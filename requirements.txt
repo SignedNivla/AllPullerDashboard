@@ -1,0 +1,7 @@
+dotenv
+sqlalchemy
+pandas
+requests
+streamlit
+py7zr
+urllib3
