@@ -1,4 +1,7 @@
 import streamlit as st
+import os
+import gc
+import tempfile
 import time
 import pandas as pd
 from eiu_api import fetch_auto_token, EIUDataAPI
@@ -1303,14 +1306,17 @@ with tab_unctad:
         )
 
         can_pull = len(sel_unctad) > 0
-        if st.button("▶  PULL UNCTAD", type="primary",
-                     use_container_width=True, disabled=not can_pull):
-            frames = []
+        if st.button("▶  PULL UNCTAD (STAGING MODE)", type="primary", use_container_width=True, disabled=not can_pull):
+            
+            staging_file = os.path.join(tempfile.gettempdir(), "unctad_staging_full.csv")
+            
+            if os.path.exists(staging_file):
+                os.remove(staging_file)
+                
+            total_rows_pulled = 0
             errors = {}
 
-            with st.status(
-                f"📡 Menarik {len(sel_unctad)} dataset...", expanded=True
-            ) as status:
+            with st.status(f"📡 Menarik & Staging {len(sel_unctad)} dataset...", expanded=True) as status:
                 for i, code in enumerate(sel_unctad, 1):
                     match = next((d for d in UNCTAD_CATALOG if d["code"] == code), None)
                     name  = match["name"] if match else code
@@ -1322,78 +1328,69 @@ with tab_unctad:
                         st.write(f"  ❌ Gagal: {err}")
                         continue
 
-                    filtered = unctad_api.filter_dataframe(
-                        df_raw, year_from=yf_u, year_to=yt_u
-                    )
-                    # Tag each row with its source dataset code + name
+                    filtered = unctad_api.filter_dataframe(df_raw, year_from=yf_u, year_to=yt_u)
                     filtered.insert(0, "dataset_name", name)
                     filtered.insert(1, "dataset_code", code)
-                    frames.append(filtered)
-                    st.write(f"  ✅ {len(filtered):,} baris")
+                    
+                    rows_in_batch = len(filtered)
+                    total_rows_pulled += rows_in_batch
+                    st.write(f"  ✅ Difilter: {rows_in_batch:,} baris")
 
-                ok   = len(frames)
+                    # =========================================================
+                    # 3. PROSES STAGING (Simpan & Buang)
+                    # =========================================================
+                    
+                    # OPSI A: Simpan ke File CSV Sementara (Mode Append)
+                    # Jika file belum ada, tulis header. Jika sudah ada, tambahkan di bawahnya tanpa header.
+                    write_header = not os.path.exists(staging_file)
+                    filtered.to_csv(staging_file, mode='a', index=False, header=write_header)
+                    
+                    # OPSI B (Opsional): Tembak langsung ke DB jika terkoneksi
+                    # if st.session_state.db_connected:
+                    #    push_to_sql(filtered, st.session_state.db_engine, "unctad_data", if_exists="append")
+                    
+                    # 4. BERSIHKAN RAM SEGERA
+                    del df_raw
+                    del filtered
+                    gc.collect() # Memaksa Python membersihkan memori yang baru saja dihapus
+                    # =========================================================
+
+                ok   = len(sel_unctad) - len(errors)
                 fail = len(errors)
 
-                if frames:
-                    # Merge all into one DataFrame
-                    merged = pd.concat(frames, ignore_index=True)
-                    st.session_state.unctad_result_df  = merged
-                    st.session_state.unctad_show_table = False
-                    st.write(f"  📊 Total gabungan: {len(merged):,} baris dari {ok} dataset")
-
+                if total_rows_pulled > 0:
+                    # Simpan lokasi file di session_state, BUKAN datanya
+                    st.session_state.unctad_staging_file = staging_file
+                    
                 status.update(
-                    label=f"✅ Selesai — {ok}/{len(sel_unctad)} berhasil, {len(merged):,} baris total"
-                          + (f", {fail} gagal" if fail else ""),
+                    label=f"✅ Selesai — {ok}/{len(sel_unctad)} berhasil, {total_rows_pulled:,} baris diamankan ke Disk.",
                     state="complete" if ok > 0 else "error",
                     expanded=False,
                 )
 
-    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    # ── Results ───────────────────────────────────────────────────────────────
-    if st.session_state.unctad_result_df is not None:
-        st.divider()
-        df = st.session_state.unctad_result_df
-
-        # Compact action bar — all in one row
-        bar1, bar2, bar3, bar4 = st.columns([1, 1.5, 1.5, 2], gap="small")
-        with bar1:
-            st.download_button(
-                "⬇ CSV", df.to_csv(index=False).encode("utf-8"),
-                "unctad_data.csv", "text/csv",
-                use_container_width=True,
-            )
-        with bar2:
-            if st.button("⚡ Push ke DB", type="primary", use_container_width=True):
-                if st.session_state.db_connected:
-                    push_data_dialog(df, show_preview=False)
-                else:
-                    db_management_dialog()
-        with bar3:
-            if st.button("🔍 Preview & Push", use_container_width=True):
-                if st.session_state.db_connected:
-                    push_data_dialog(df, show_preview=True)
-                else:
-                    db_management_dialog()
-        with bar4:
-            lbl = "▲ Sembunyikan Tabel" if st.session_state.unctad_show_table else "▼ Tampilkan Tabel"
-            if st.button(lbl, use_container_width=True):
-                st.session_state.unctad_show_table = not st.session_state.unctad_show_table
-                st.rerun()
-
-        # Info strip
-        n_datasets = df["dataset_code"].nunique() if "dataset_code" in df.columns else 1
-        st.markdown(
-            f"<div style='font-size:11px; color:#5A6080; padding:4px 2px;'>"
-            f"<span style='color:#F0F0DB; font-weight:700;'>{len(df):,}</span> baris &nbsp;·&nbsp;"
-            f"<span style='color:#F0F0DB; font-weight:700;'>{len(df.columns)}</span> kolom &nbsp;·&nbsp;"
-            f"<span style='color:#ACBAC4;'>{n_datasets} dataset digabung</span>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-
-        if st.session_state.unctad_show_table:
-            st.dataframe(df, use_container_width=True, height=420)
+        # ── Results (Ambil dari File Staging) ────────────────────────────────────────────────
+        if 'unctad_staging_file' in st.session_state and os.path.exists(st.session_state.unctad_staging_file):
+            st.divider()
+            st.success("Data berhasil di-staging ke dalam disk (memori aman).")
+            
+            # Tombol Download langsung membaca dari file
+            with open(st.session_state.unctad_staging_file, "rb") as file:
+                st.download_button(
+                    label="⬇ Download CSV Lengkap",
+                    data=file,
+                    file_name="unctad_all_data.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    type="primary"
+                )
+            
+            # PENTING: Karena data sangat besar, jangan tampilkan st.dataframe untuk seluruh data!
+            # Tampilkan saja 100 baris pertama sebagai preview.
+            st.caption("Preview 100 baris pertama (Sisa data tersimpan aman di file download):")
+            preview_df = pd.read_csv(st.session_state.unctad_staging_file, nrows=100)
+            st.dataframe(preview_df, use_container_width=True, height=300)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 6 — DATABASE

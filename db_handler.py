@@ -12,4 +12,4 @@ def get_engine(db_type, db_user, db_pass, db_host, db_port, db_name):
 
 def push_to_sql(df, engine, table_name):
     """Mengirim data ke tabel yang dipilih"""
-    df.to_sql(table_name, con=engine, if_exists='append', index=False)
+    df.to_sql(table_name, con=engine, if_exists='append', index=False, chunksize=10000, method ='multi')
