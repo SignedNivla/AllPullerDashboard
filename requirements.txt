@@ -5,3 +5,7 @@ requests
 streamlit
 py7zr
 urllib3
+polars
+pyarrow
+pymysql
+psycopg2
