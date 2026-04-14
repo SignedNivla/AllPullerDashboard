@@ -1,8 +1,13 @@
+import glob
+import polars as pl
 import streamlit as st
+import os
+import gc
+import tempfile
 import time
 import pandas as pd
 from eiu_api import fetch_auto_token, EIUDataAPI
-from db_handler import get_engine, push_to_sql
+from db_handler import get_engine, push_parquet_dir_to_db, push_to_sql
 from unctad_api import UNCTADDataAPI
 from unctad_catalog import catalog_as_tree, UNCTAD_CATALOG
 from config import EIU_EMAIL, EIU_PASSWORD
@@ -130,6 +135,22 @@ def push_data_dialog(df, show_preview=False):
             st.rerun()
         except Exception as e:
             st.error(f"Gagal: {e}")
+
+@st.dialog("Transfer Data Masif ke Database")
+def push_massive_dialog(staging_dir):
+    st.info("Data berukuran besar akan dipindahkan secara bertahap (chunking) agar aplikasi tidak hang.")
+    
+    tbl = st.text_input(
+        "Tabel Tujuan", 
+        value=st.session_state.db_config.get('table_default', 'unctad_data')
+    )
+    
+    if st.button("Mulai Transfer", type="primary", use_container_width=True):
+        # Panggil fungsi push yang ada di db_handler.py
+        push_parquet_dir_to_db(staging_dir, st.session_state.db_engine, tbl)
+        
+        time.sleep(1.5)
+        st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1303,97 +1324,128 @@ with tab_unctad:
         )
 
         can_pull = len(sel_unctad) > 0
-        if st.button("▶  PULL UNCTAD", type="primary",
-                     use_container_width=True, disabled=not can_pull):
-            frames = []
-            errors = {}
+        if st.button("▶  PULL UNCTAD (STAGING MODE)", type="primary", use_container_width=True, disabled=not can_pull):
+            
+            # 1. Siapkan direktori
+            staging_dir = os.path.join(tempfile.gettempdir(), "unctad_staging_parquet")
+            os.makedirs(staging_dir, exist_ok=True)
+            
+            # Bersihkan folder jika ada sisa tarikan lama
+            for f in glob.glob(os.path.join(staging_dir, "*.parquet")):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+                
+            total_rows_pulled = 0
+            errors = {}  # <-- DEKLARASI ERRORS DI SINI
 
-            with st.status(
-                f"📡 Menarik {len(sel_unctad)} dataset...", expanded=True
-            ) as status:
+            with st.status(f"📡 Memproses Data Masif...", expanded=True) as status:
                 for i, code in enumerate(sel_unctad, 1):
                     match = next((d for d in UNCTAD_CATALOG if d["code"] == code), None)
                     name  = match["name"] if match else code
-                    st.write(f"[{i}/{len(sel_unctad)}] {name}...")
+                    st.write(f"[{i}/{len(sel_unctad)}] Mengekstrak {name}...")
 
-                    df_raw, err = unctad_api.fetch_dataset(code)
+                    # 2. Unduh dan Ekstrak Saja (Jangan buka pakai Pandas)
+                    csv_file_path, err = unctad_api.download_and_extract_only(code) 
+                    
                     if err:
-                        errors[code] = err
-                        st.write(f"  ❌ Gagal: {err}")
+                        errors[code] = err # <-- CATAT JIKA ERROR
+                        st.write(f"  ❌ Gagal unduh/ekstrak: {err}")
                         continue
 
-                    filtered = unctad_api.filter_dataframe(
-                        df_raw, year_from=yf_u, year_to=yt_u
-                    )
-                    # Tag each row with its source dataset code + name
-                    filtered.insert(0, "dataset_name", name)
-                    filtered.insert(1, "dataset_code", code)
-                    frames.append(filtered)
-                    st.write(f"  ✅ {len(filtered):,} baris")
+                    # 3. Filter dengan Polars
+                    st.write("  ⚙️ Memfilter jutaan baris dengan Polars...")
+                    df_polars, err_pl = unctad_api.fetch_and_filter_massive(csv_file_path, yf_u, yt_u)
+                    
+                    if err_pl or df_polars is None:
+                        errors[code] = err_pl or "Gagal memfilter data"
+                        st.write(f"  ❌ Gagal memproses: {errors[code]}")
+                        continue
 
-                ok   = len(frames)
+                    # 4. Tambahkan label
+                    df_polars = df_polars.with_columns([
+                        pl.lit(name).alias("dataset_name"),
+                        pl.lit(code).alias("dataset_code")
+                    ])
+                    
+                    rows_in_batch = df_polars.height
+                    total_rows_pulled += rows_in_batch
+                    st.write(f"  ✅ Tersaring: {rows_in_batch:,} baris")
+
+                    # 5. Simpan ke Parquet
+                    parquet_path = os.path.join(staging_dir, f"unctad_{code}.parquet")
+                    df_polars.write_parquet(parquet_path)
+                    
+                    # 6. Pembersihan RAM
+                    del df_polars
+                    gc.collect()
+
+                # --- MENGHITUNG OK DAN FAIL (YANG SEMPAT TERLEWAT) ---
+                ok   = len(sel_unctad) - len(errors)
                 fail = len(errors)
 
-                if frames:
-                    # Merge all into one DataFrame
-                    merged = pd.concat(frames, ignore_index=True)
-                    st.session_state.unctad_result_df  = merged
-                    st.session_state.unctad_show_table = False
-                    st.write(f"  📊 Total gabungan: {len(merged):,} baris dari {ok} dataset")
+                if total_rows_pulled > 0:
+                    st.session_state.unctad_staging_dir = staging_dir
 
+                # 7. Update Status UI
+                pesan_gagal = f", {fail} gagal" if fail > 0 else ""
                 status.update(
-                    label=f"✅ Selesai — {ok}/{len(sel_unctad)} berhasil, {len(merged):,} baris total"
-                          + (f", {fail} gagal" if fail else ""),
+                    label=f"✅ Selesai — {ok}/{len(sel_unctad)} berhasil{pesan_gagal}. {total_rows_pulled:,} baris diamankan ke Disk.",
                     state="complete" if ok > 0 else "error",
                     expanded=False,
                 )
 
-    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    # ── Results ───────────────────────────────────────────────────────────────
-    if st.session_state.unctad_result_df is not None:
-        st.divider()
-        df = st.session_state.unctad_result_df
-
-        # Compact action bar — all in one row
-        bar1, bar2, bar3, bar4 = st.columns([1, 1.5, 1.5, 2], gap="small")
-        with bar1:
-            st.download_button(
-                "⬇ CSV", df.to_csv(index=False).encode("utf-8"),
-                "unctad_data.csv", "text/csv",
-                use_container_width=True,
-            )
-        with bar2:
-            if st.button("⚡ Push ke DB", type="primary", use_container_width=True):
-                if st.session_state.db_connected:
-                    push_data_dialog(df, show_preview=False)
-                else:
-                    db_management_dialog()
-        with bar3:
-            if st.button("🔍 Preview & Push", use_container_width=True):
-                if st.session_state.db_connected:
-                    push_data_dialog(df, show_preview=True)
-                else:
-                    db_management_dialog()
-        with bar4:
-            lbl = "▲ Sembunyikan Tabel" if st.session_state.unctad_show_table else "▼ Tampilkan Tabel"
-            if st.button(lbl, use_container_width=True):
-                st.session_state.unctad_show_table = not st.session_state.unctad_show_table
-                st.rerun()
-
-        # Info strip
-        n_datasets = df["dataset_code"].nunique() if "dataset_code" in df.columns else 1
-        st.markdown(
-            f"<div style='font-size:11px; color:#5A6080; padding:4px 2px;'>"
-            f"<span style='color:#F0F0DB; font-weight:700;'>{len(df):,}</span> baris &nbsp;·&nbsp;"
-            f"<span style='color:#F0F0DB; font-weight:700;'>{len(df.columns)}</span> kolom &nbsp;·&nbsp;"
-            f"<span style='color:#ACBAC4;'>{n_datasets} dataset digabung</span>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-
-        if st.session_state.unctad_show_table:
-            st.dataframe(df, use_container_width=True, height=420)
+        # ── Results (Ambil dari Direktori Staging Parquet) ──────────────────────────────────
+        if 'unctad_staging_dir' in st.session_state and os.path.exists(st.session_state.unctad_staging_dir):
+            staging_dir = st.session_state.unctad_staging_dir
+            
+            st.divider()
+            st.success("✅ Data masif berhasil di-staging ke dalam disk (Format Parquet).")
+            
+            bar1, bar2, bar3 = st.columns([1.5, 1.5, 1.5], gap="small")
+            
+            with bar1:
+                # Bungkus folder Parquet menjadi file ZIP sebelum didownload
+                import shutil
+                zip_path = os.path.join(tempfile.gettempdir(), "unctad_data_export.zip")
+                shutil.make_archive(zip_path.replace(".zip", ""), 'zip', staging_dir)
+                
+                with open(zip_path, "rb") as file:
+                    st.download_button(
+                        label="⬇ Download Semua Data (.zip)", 
+                        data=file, 
+                        file_name="unctad_massive_data.zip",
+                        mime="application/zip", 
+                        use_container_width=True
+                    )
+            
+            with bar2:
+                if st.button("⚡ Push ke DB (Staging)", type="primary", use_container_width=True):
+                    if st.session_state.db_connected:
+                        # Fungsi baru untuk mengirim data dari folder Parquet
+                        push_massive_dialog(staging_dir)
+                    else:
+                        db_management_dialog()
+            
+            with bar3:
+                # Preview: Membaca 50 baris pertama HANYA dari file Parquet pertama yang ketemu
+                if st.button("🔍 Preview & Push", use_container_width=True):
+                    if st.session_state.db_connected:
+                        import glob
+                        import polars as pl
+                        
+                        parquet_files = glob.glob(os.path.join(staging_dir, "*.parquet"))
+                        if parquet_files:
+                            # Baca dengan polars, ambil 50 baris, ubah ke pandas khusus untuk keperluan UI st.dataframe
+                            preview_df = pl.read_parquet(parquet_files[0]).head(50).to_pandas()
+                            push_data_dialog(preview_df, show_preview=True)
+                        else:
+                            st.error("Tidak ada data parquet untuk di-preview.")
+                    else:
+                        db_management_dialog()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 6 — DATABASE
