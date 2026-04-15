@@ -138,18 +138,15 @@ def push_data_dialog(df, show_preview=False):
 
 @st.dialog("Transfer Data Masif ke Database")
 def push_massive_dialog(staging_dir):
-    st.info("Data berukuran besar akan dipindahkan secara bertahap (chunking) agar aplikasi tidak hang.")
+    st.info("Sistem akan membuat tabel otomatis berdasarkan Kode Dataset.")
     
-    tbl = st.text_input(
-        "Tabel Tujuan", 
-        value=st.session_state.db_config.get('table_default', 'unctad_data')
-    )
+    # User hanya input awalan, misal 'unctad' atau 'riset_2026'
+    prefix = st.text_input("Awalan Nama Tabel", value="unctad")
     
-    if st.button("Mulai Transfer", type="primary", use_container_width=True):
-        # Panggil fungsi push yang ada di db_handler.py
-        push_parquet_dir_to_db(staging_dir, st.session_state.db_engine, tbl)
-        
-        time.sleep(1.5)
+    if st.button("Mulai Transfer Otomatis", type="primary", use_container_width=True):
+        # Panggil fungsi baru yang kita buat tadi
+        push_parquet_dir_to_db(staging_dir, st.session_state.db_engine, prefix)
+        time.sleep(2)
         st.rerun()
 
 
@@ -168,6 +165,21 @@ if not st.session_state.token:
 api     = EIUDataAPI(st.session_state.token)
 
 # ── One-time warm-up: pre-fill all caches on first load ──────────────────────
+
+def _flatten(data):
+    rows = []
+    for rec in data:
+        for pt in rec.get("points", []):
+            rows.append({
+                "geography_name": rec.get("geographyName"),
+                "series_name":    rec.get("seriesName"),
+                "unit":           rec.get("unit"),
+                "year":           pt.get("time", {}).get("year"),
+                "value":          pt.get("value"),
+                "status":         pt.get("status"),
+            })
+    return rows
+
 if 'cache_warmed' not in st.session_state:
     with st.spinner("Memuat data referensi..."):
         api.fetch_reference()
@@ -1434,14 +1446,11 @@ with tab_unctad:
                 # Preview: Membaca 50 baris pertama HANYA dari file Parquet pertama yang ketemu
                 if st.button("🔍 Preview & Push", use_container_width=True):
                     if st.session_state.db_connected:
-                        import glob
-                        import polars as pl
-                        
                         parquet_files = glob.glob(os.path.join(staging_dir, "*.parquet"))
                         if parquet_files:
                             # Baca dengan polars, ambil 50 baris, ubah ke pandas khusus untuk keperluan UI st.dataframe
                             preview_df = pl.read_parquet(parquet_files[0]).head(50).to_pandas()
-                            push_data_dialog(preview_df, show_preview=True)
+                            push_massive_dialog(staging_dir)
                         else:
                             st.error("Tidak ada data parquet untuk di-preview.")
                     else:
