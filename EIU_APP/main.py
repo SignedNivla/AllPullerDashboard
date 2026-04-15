@@ -836,8 +836,8 @@ with tab_article:
                 op1, op2 = st.columns([2, 3], gap="medium")
                 with op1:
                     bulk_max = st.number_input(
-                        "Maksimum artikel:", min_value=10, max_value=5000,
-                        value=100, step=10, key="bulk_max",
+                        "Maksimum artikel:", min_value=10, max_value=10000,
+                        value=100, step=20, key="bulk_max",
                         help="Jumlah maksimum artikel yang akan ditarik."
                     )
                 with op2:
@@ -913,32 +913,62 @@ with tab_article:
                 import re
                 return re.sub(r"<[^>]+>", " ", html).strip() if html else ""
 
+            def _fetch_one(art_id, hdrs):
+                """Fetch headline + body_text for one article."""
+                import time as _time
+                for attempt in range(3):
+                    try:
+                        res = api.fetch_article_details(art_id)
+                        ninjs = res.get("articleAsNinjs", {})
+                        return {
+                            "headline":  ninjs.get("headline", ""),
+                            "body_text": _strip_html(ninjs.get("body_html", "")),
+                        }
+                    except Exception:
+                        _time.sleep(1)
+                return {"headline": "", "body_text": ""}
+
             def _run_bulk_pull(items, fetch_full_content, source_label):
-                rows      = []
-                total     = len(items)
-                err_count = 0
-                bar       = st.progress(0, text=f"Memproses 0/{total} artikel...")
-                for i, item in enumerate(items):
-                    meta   = _extract_meta(item)
-                    art_id = meta["articleId"]
-                    if fetch_full_content and art_id:
-                        try:
-                            details = api.fetch_article_details(art_id)
-                            ninjs   = details.get("articleAsNinjs", {})
-                            meta["headline"]  = ninjs.get("headline", "")
-                            meta["body_text"] = _strip_html(ninjs.get("body_html", ""))
-                            meta["language"]  = ninjs.get("language", "")
-                        except Exception:
-                            err_count += 1
-                            meta["headline"] = ""; meta["body_text"] = ""
-                    meta["source_pull"] = source_label
-                    rows.append(meta)
-                    bar.progress((i + 1) / total,
-                                 text=f"Memproses {i+1}/{total} — {meta['articleTitle'][:50]}...")
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                total  = len(items)
+                metas  = [_extract_meta(it) for it in items]
+                rows   = [None] * total
+                bar    = st.progress(0, text=f"Memproses 0/{total} artikel...")
+                done   = 0
+
+                if fetch_full_content:
+                    N_WORKERS = 15
+                    with ThreadPoolExecutor(max_workers=N_WORKERS) as ex:
+                        fut_map = {
+                            ex.submit(_fetch_one, metas[i]["articleId"], None): i
+                            for i in range(total) if metas[i]["articleId"]
+                        }
+                        for fut in as_completed(fut_map):
+                            i       = fut_map[fut]
+                            content = fut.result()
+                            rows[i] = {**metas[i], **content, "source_pull": source_label}
+                            done   += 1
+                            bar.progress(done / total,
+                                text=f"[{done}/{total}] {rows[i].get('articleTitle','')[:55]}...")
+                    # fill skipped
+                    for i in range(total):
+                        if rows[i] is None:
+                            rows[i] = {**metas[i], "headline": "", "body_text": "",
+                                       "source_pull": source_label}
+                else:
+                    for i, meta in enumerate(metas):
+                        rows[i] = {**meta, "source_pull": source_label}
+                        done += 1
+                        bar.progress(done / total,
+                            text=f"[{done}/{total}] {meta.get('articleTitle','')[:55]}...")
+
                 bar.empty()
-                if err_count:
-                    st.warning(f"{err_count} artikel gagal diambil kontennya.")
-                return pd.DataFrame(rows)
+                df = pd.DataFrame(rows)
+                # Keep only target columns if full content fetched
+                target_cols = ["articleId", "articleTitle", "publicationDate",
+                               "headline", "body_text", "source_pull"]
+                keep = [c for c in target_cols if c in df.columns]
+                return df[keep]
 
             if bulk_btn:
                 with st.status("📡 Menjalankan Bulk Download...", expanded=True) as bstatus:
