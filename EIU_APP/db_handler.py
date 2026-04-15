@@ -22,7 +22,6 @@ def push_to_sql(df, engine, table_name):
         df_clean = df.copy()
         df_clean.columns = [clean_column_name(c) for c in df_clean.columns]
         
-        # Kirim ke SQL
         df_clean.to_sql(
             table_name, 
             con=engine, 
@@ -33,7 +32,6 @@ def push_to_sql(df, engine, table_name):
         )
         st.success(f"✅ Berhasil mengirim {len(df_clean):,} baris ke `{table_name}`")
     except Exception as e:
-        # Tampilkan error asli agar kita tahu masalahnya jika bukan kolom
         st.error(f"❌ Gagal mengirim ke `{table_name}`. Pesan: {str(e)}")
 
 def check_db_rows(engine, table_name):
@@ -67,18 +65,14 @@ def push_parquet_dir_to_db(staging_dir, engine, table_prefix="unctad"):
     progress_container = st.empty()
     
     for file_path in parquet_files:
-        # 1. Ambil Dataset Code dari nama file (misal: unctad_US.IntraTrade.parquet)
         filename = os.path.basename(file_path).replace(".parquet", "")
-        # Bersihkan nama agar aman untuk SQL (jadi unctad_us_intratrade)
         dynamic_table_name = f"{table_prefix}_{clean_column_name(filename)}"
         
         st.write(f"📦 Memproses tabel: `{dynamic_table_name}`...")
         
-        # 2. Baca data
         df_pd = pl.read_parquet(file_path).to_pandas()
         df_pd.columns = [clean_column_name(c) for c in df_pd.columns]
         
-        # 3. Kirim ke DB (Gunakan 'replace' agar skema selalu segar sesuai dataset)
         try:
             df_pd.to_sql(
                 name=dynamic_table_name,

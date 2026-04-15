@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
 import polars as pl
 import streamlit as st
@@ -947,30 +948,50 @@ with tab_article:
                 return re.sub(r"<[^>]+>", " ", html).strip() if html else ""
 
             def _run_bulk_pull(items, fetch_full_content, source_label):
-                rows      = []
-                total     = len(items)
+                rows = []
+                total = len(items)
                 err_count = 0
-                bar       = st.progress(0, text=f"Memproses 0/{total} artikel...")
-                for i, item in enumerate(items):
-                    meta   = _extract_meta(item)
+                
+                bar_container = st.empty()
+                bar = bar_container.progress(0, text="Initializing workers... Please wait.")
+
+                def fetch_single_article(item):
+                    meta = _extract_meta(item)
                     art_id = meta["articleId"]
+                    
                     if fetch_full_content and art_id:
                         try:
                             details = api.fetch_article_details(art_id)
-                            ninjs   = details.get("articleAsNinjs", {})
-                            meta["headline"]  = ninjs.get("headline", "")
+                            ninjs = details.get("articleAsNinjs", {})
+                            meta["headline"] = ninjs.get("headline", "")
                             meta["body_text"] = _strip_html(ninjs.get("body_html", ""))
-                            meta["language"]  = ninjs.get("language", "")
+                            meta["language"] = ninjs.get("language", "")
                         except Exception:
-                            err_count += 1
-                            meta["headline"] = ""; meta["body_text"] = ""
+                            return None, True
+                    
                     meta["source_pull"] = source_label
-                    rows.append(meta)
-                    bar.progress((i + 1) / total,
-                                 text=f"Memproses {i+1}/{total} — {meta['articleTitle'][:50]}...")
-                bar.empty()
+                    return meta, False
+
+                with ThreadPoolExecutor(max_workers=10) as executor:
+                    futures = {executor.submit(fetch_single_article, item): item for item in items}
+                    
+                    done_count = 0
+                    for future in as_completed(futures):
+                        done_count += 1
+                        result, is_error = future.result()
+                        
+                        if is_error:
+                            err_count += 1
+                        elif result:
+                            rows.append(result)
+                    
+                        bar.progress(done_count / total, 
+                                    text=f"Selesai {done_count}/{total} artikel... ({err_count} gagal)")
+
+                bar_container.empty()
                 if err_count:
-                    st.warning(f"{err_count} artikel gagal diambil kontennya.")
+                    st.warning(f"Selesai, tapi ada {err_count} artikel yang gagal diambil kontennya.")
+                
                 return pd.DataFrame(rows)
 
             if bulk_btn:
@@ -1338,11 +1359,9 @@ with tab_unctad:
         can_pull = len(sel_unctad) > 0
         if st.button("▶  PULL UNCTAD (STAGING MODE)", type="primary", use_container_width=True, disabled=not can_pull):
             
-            # 1. Siapkan direktori
             staging_dir = os.path.join(tempfile.gettempdir(), "unctad_staging_parquet")
             os.makedirs(staging_dir, exist_ok=True)
             
-            # Bersihkan folder jika ada sisa tarikan lama
             for f in glob.glob(os.path.join(staging_dir, "*.parquet")):
                 try:
                     os.remove(f)
@@ -1350,7 +1369,7 @@ with tab_unctad:
                     pass
                 
             total_rows_pulled = 0
-            errors = {}  # <-- DEKLARASI ERRORS DI SINI
+            errors = {}
 
             with st.status(f"📡 Memproses Data Masif...", expanded=True) as status:
                 for i, code in enumerate(sel_unctad, 1):
@@ -1358,15 +1377,13 @@ with tab_unctad:
                     name  = match["name"] if match else code
                     st.write(f"[{i}/{len(sel_unctad)}] Mengekstrak {name}...")
 
-                    # 2. Unduh dan Ekstrak Saja (Jangan buka pakai Pandas)
                     csv_file_path, err = unctad_api.download_and_extract_only(code) 
                     
                     if err:
-                        errors[code] = err # <-- CATAT JIKA ERROR
+                        errors[code] = err
                         st.write(f"  ❌ Gagal unduh/ekstrak: {err}")
                         continue
 
-                    # 3. Filter dengan Polars
                     st.write("  ⚙️ Memfilter jutaan baris dengan Polars...")
                     df_polars, err_pl = unctad_api.fetch_and_filter_massive(csv_file_path, yf_u, yt_u)
                     
@@ -1375,7 +1392,6 @@ with tab_unctad:
                         st.write(f"  ❌ Gagal memproses: {errors[code]}")
                         continue
 
-                    # 4. Tambahkan label
                     df_polars = df_polars.with_columns([
                         pl.lit(name).alias("dataset_name"),
                         pl.lit(code).alias("dataset_code")
@@ -1385,22 +1401,18 @@ with tab_unctad:
                     total_rows_pulled += rows_in_batch
                     st.write(f"  ✅ Tersaring: {rows_in_batch:,} baris")
 
-                    # 5. Simpan ke Parquet
                     parquet_path = os.path.join(staging_dir, f"unctad_{code}.parquet")
                     df_polars.write_parquet(parquet_path)
                     
-                    # 6. Pembersihan RAM
                     del df_polars
                     gc.collect()
 
-                # --- MENGHITUNG OK DAN FAIL (YANG SEMPAT TERLEWAT) ---
                 ok   = len(sel_unctad) - len(errors)
                 fail = len(errors)
 
                 if total_rows_pulled > 0:
                     st.session_state.unctad_staging_dir = staging_dir
 
-                # 7. Update Status UI
                 pesan_gagal = f", {fail} gagal" if fail > 0 else ""
                 status.update(
                     label=f"✅ Selesai — {ok}/{len(sel_unctad)} berhasil{pesan_gagal}. {total_rows_pulled:,} baris diamankan ke Disk.",
@@ -1437,18 +1449,15 @@ with tab_unctad:
             with bar2:
                 if st.button("⚡ Push ke DB (Staging)", type="primary", use_container_width=True):
                     if st.session_state.db_connected:
-                        # Fungsi baru untuk mengirim data dari folder Parquet
                         push_massive_dialog(staging_dir)
                     else:
                         db_management_dialog()
             
             with bar3:
-                # Preview: Membaca 50 baris pertama HANYA dari file Parquet pertama yang ketemu
                 if st.button("🔍 Preview & Push", use_container_width=True):
                     if st.session_state.db_connected:
                         parquet_files = glob.glob(os.path.join(staging_dir, "*.parquet"))
                         if parquet_files:
-                            # Baca dengan polars, ambil 50 baris, ubah ke pandas khusus untuk keperluan UI st.dataframe
                             preview_df = pl.read_parquet(parquet_files[0]).head(50).to_pandas()
                             push_massive_dialog(staging_dir)
                         else:
