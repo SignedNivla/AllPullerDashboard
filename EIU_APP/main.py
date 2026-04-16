@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
+import math
 import polars as pl
 import streamlit as st
 import os
@@ -8,7 +9,7 @@ import tempfile
 import time
 import pandas as pd
 from eiu_api import fetch_auto_token, EIUDataAPI
-from db_handler import get_engine, push_parquet_dir_to_db, push_to_sql
+from db_handler import clean_column_name, get_engine, push_parquet_dir_to_db, push_to_sql
 from unctad_api import UNCTADDataAPI
 from unctad_catalog import catalog_as_tree, UNCTAD_CATALOG
 from config import EIU_EMAIL, EIU_PASSWORD
@@ -870,7 +871,7 @@ with tab_article:
                 op1, op2 = st.columns([2, 3], gap="medium")
                 with op1:
                     bulk_max = st.number_input(
-                        "Maksimum artikel:", min_value=10, max_value=10000,
+                        "Maksimum artikel(per negara):", min_value=10, max_value=10000,
                         value=100, step=20, key="bulk_max",
                         help="Jumlah maksimum artikel yang akan ditarik."
                     )
@@ -894,26 +895,74 @@ with tab_article:
             </div>
             """, unsafe_allow_html=True)
 
-            bulk_btn = st.button(
-                "▶  MULAI BULK DOWNLOAD",
-                type="primary", use_container_width=True, key="bulk_run"
+            mode_eksekusi = st.radio(
+                "Mode Penarikan:",
+                options=[
+                    "📁 Reguler (Kumpulkan jadi 1 tabel & Tampilkan di layar)", 
+                    "🗄️ Database Pipeline (Tarik per negara & Otomatis bikin tabel di DB)"
+                ],
+                key="bulk_mode"
             )
+
+            if "Database Pipeline" in mode_eksekusi:
+                prefix_db = st.text_input("Awalan Nama Tabel Database:", value="eiu_artikel")
+
+            bulk_btn = st.button("▶ MULAI EKSEKUSI", type="primary", use_container_width=True)
 
             # ── Pull logic ────────────────────────────────────────────────────
             def _collect_articles_search(max_articles):
-                g_codes   = [geo_map[n] for n in bsel_geo]
+                g_codes = [geo_map[n] for n in bsel_geo]
                 collected = []
-                page = 1
-                while len(collected) < max_articles:
-                    res = api.advanced_search_articles(
+                
+                # 1. Tarik halaman PERTAMA secara sinkron untuk mengetahui Total Halaman & Page Size
+                res = api.advanced_search_articles(
+                    search_string=bq_text, geo_codes=g_codes,
+                    industries=bsel_ind or None, themes=bsel_themes or None, page=1
+                )
+                
+                items = res.get("results", [])
+                if not items:
+                    return []
+                    
+                collected.extend(items)
+                total_pages = res.get("totalPages", 1)
+                
+                # Jika hasil halaman 1 sudah memenuhi target, atau tidak ada halaman selanjutnya -> Selesai
+                if len(collected) >= max_articles or total_pages <= 1:
+                    return collected[:max_articles]
+                    
+                # 2. Hitung berapa halaman lagi yang PERLU ditarik (agar tidak menarik data berlebihan)
+                page_size = len(items)
+                remaining_items = max_articles - len(collected)
+                additional_pages_needed = math.ceil(remaining_items / page_size) if page_size > 0 else total_pages
+                
+                # Batasi penarikan maksimal sampai total_pages yang tersedia di API
+                last_page_to_fetch = min(total_pages, 1 + additional_pages_needed)
+                
+                # Fungsi kecil khusus untuk dieksekusi oleh Thread
+                def fetch_page(p):
+                    r = api.advanced_search_articles(
                         search_string=bq_text, geo_codes=g_codes,
-                        industries=bsel_ind or None, themes=bsel_themes or None, page=page,
+                        industries=bsel_ind or None, themes=bsel_themes or None, page=p
                     )
-                    items = res.get("results", [])
-                    if not items: break
-                    collected.extend(items)
-                    if page >= res.get("totalPages", 1): break
-                    page += 1
+                    return r.get("results", [])
+                    
+                # 3. Tarik sisa halaman (Halaman 2 dst) secara PARALEL
+                # Anda bisa menaikkan max_workers menjadi 20 atau 30 jika API EIU tidak memblokir (Rate Limit)
+                with ThreadPoolExecutor(max_workers=10) as executor:
+                    # Kirim tugas penarikan halaman 2 sampai 'last_page_to_fetch' secara serentak
+                    futures = {executor.submit(fetch_page, p): p for p in range(2, last_page_to_fetch + 1)}
+                    
+                    for future in as_completed(futures):
+                        new_items = future.result()
+                        if new_items:
+                            collected.extend(new_items)
+                        
+                        # Begitu jumlah artikel terkumpul sudah mencapai batas, kita bisa keluar dari loop
+                        if len(collected) >= max_articles:
+                            break
+
+                # Pastikan kita hanya mengembalikan jumlah artikel sesuai permintaan (max_articles)
                 return collected[:max_articles]
 
             def _collect_articles_sync(max_articles):
@@ -946,6 +995,85 @@ with tab_article:
             def _strip_html(html):
                 import re
                 return re.sub(r"<[^>]+>", " ", html).strip() if html else ""
+            
+            def _generate_table_name(prefix, country_name):
+                """Membuat nama tabel yang aman untuk SQL"""
+                # Menggunakan fungsi bawaan Anda dari db_handler
+                clean_name = clean_column_name(country_name) 
+                return f"{prefix}_{clean_name}"
+
+            def _run_bulk_pull_and_push_per_country(selected_countries, bq_text, bsel_ind, bsel_themes, prefix, max_articles, engine, api, _extract_meta, geo_map):
+                total_countries = len(selected_countries)
+                overall_bar = st.progress(0, text=f"Memulai pemrosesan untuk {total_countries} negara...")
+                step_status = st.empty()
+                
+                success_count = 0
+                total_rows_inserted = 0
+
+                for idx, country_name in enumerate(selected_countries):
+                    counter_text = f"({idx+1}/{total_countries})"
+                    step_status.info(f"⏳ **{country_name}** {counter_text}: Menghubungi server API untuk halaman pertama...")
+                    
+                    g_code = geo_map[country_name]
+                    table_name = _generate_table_name(prefix, country_name)
+                    
+                    def fetch_page(p):
+                        r = api.advanced_search_articles(
+                            search_string=bq_text, geo_codes=[g_code],
+                            industries=bsel_ind or None, themes=bsel_themes or None, page=p
+                        )
+                        return r.get("results", [])
+
+                    # Tarik Halaman 1
+                    first_res = api.advanced_search_articles(
+                        search_string=bq_text, geo_codes=[g_code],
+                        industries=bsel_ind or None, themes=bsel_themes or None, page=1
+                    )
+                    
+                    items = first_res.get("results", [])
+                    if not items:
+                        overall_bar.progress((idx + 1) / total_countries, text=f"⏩ Melewati {country_name} {counter_text} (Tidak ada data)")
+                        continue 
+
+                    collected = list(items)
+                    total_pages = first_res.get("totalPages", 1)
+
+                    # Multithreading sisa halaman
+                    if total_pages > 1 and len(collected) < max_articles:
+                        step_status.info(f"📥 **{country_name}** {counter_text}: Menarik sisa halaman data secara paralel...")
+                        page_size = len(items) if len(items) > 0 else 50
+                        remaining_needed = max_articles - len(collected)
+                        additional_pages = math.ceil(remaining_needed / page_size)
+                        last_page = min(total_pages, 1 + additional_pages)
+
+                        with ThreadPoolExecutor(max_workers=10) as executor:
+                            futures = {executor.submit(fetch_page, p): p for p in range(2, last_page + 1)}
+                            for future in as_completed(futures):
+                                new_items = future.result()
+                                if new_items:
+                                    collected.extend(new_items)
+                                if len(collected) >= max_articles:
+                                    break
+
+                    # Potong list sesuai max_articles
+                    collected = collected[:max_articles]
+                    step_status.warning(f"⚙️ **{country_name}** {counter_text}: Memformat {len(collected)} baris data...")
+                    # Ekstrak data
+                    rows = [_extract_meta(item) for item in collected]
+                    df = pd.DataFrame(rows)
+
+                    # Push ke Database menggunakan fungsi tangguh dari db_handler Anda
+                    if not df.empty:
+                        # Gunakan if_exists_mode='replace' agar tabel lama ditimpa tabel baru yang fresh
+                        push_to_sql(df, engine, table_name, if_exists_mode='replace')
+                        success_count += 1
+                        total_rows_inserted += len(df)
+
+                    overall_bar.progress((idx + 1) / total_countries, text=f"✅ Selesai memproses {country_name} {counter_text}")
+
+                step_status.empty()
+                
+                return success_count, total_rows_inserted
 
             def _run_bulk_pull(items, fetch_full_content, source_label):
                 rows = []
@@ -995,26 +1123,55 @@ with tab_article:
                 return pd.DataFrame(rows)
 
             if bulk_btn:
-                with st.status("📡 Menjalankan Bulk Download...", expanded=True) as bstatus:
-                    if is_search_mode:
-                        st.write("Mengambil daftar artikel dari pencarian...")
-                        items = _collect_articles_search(bulk_max)
-                        src_label = "search"
-                    else:
-                        st.write("Mengambil daftar artikel dari rentang tanggal...")
-                        items = _collect_articles_sync(bulk_max)
-                        src_label = "modified"
+                if 'Reguler' in mode_eksekusi:
+                    with st.status("📡 Menjalankan Bulk Download...", expanded=True) as bstatus:
+                        if is_search_mode:
+                            st.write("Mengambil daftar artikel dari pencarian...")
+                            items = _collect_articles_search(bulk_max)
+                            src_label = "search"
+                        else:
+                            st.write("Mengambil daftar artikel dari rentang tanggal...")
+                            items = _collect_articles_sync(bulk_max)
+                            src_label = "modified"
 
-                    if not items:
-                        bstatus.update(label="⚠️ Tidak ada artikel ditemukan.", state="error")
+                        if not items:
+                            bstatus.update(label="⚠️ Tidak ada artikel ditemukan.", state="error")
+                        else:
+                            st.write(f"✅ {len(items)} artikel ditemukan. Memproses...")
+                            df_bulk = _run_bulk_pull(items, fetch_full, src_label)
+                            st.session_state["bulk_art_df"] = df_bulk
+                            bstatus.update(
+                                label=f"✅ Selesai — {len(df_bulk):,} artikel berhasil diunduh.",
+                                state="complete", expanded=False,
+                            )
+                else:
+                    if not st.session_state.db_connected:
+                        st.error("❌ Koneksi Database belum aktif! Silakan hubungkan di Tab Database.")
+                    elif not is_search_mode:
+                        st.warning("Mode Pipeline per negara saat ini baru dioptimalkan untuk opsi Pencarian (Keyword/Tema).")
+                    elif not bsel_geo:
+                        st.error("Silakan pilih minimal 1 negara di Langkah 2.")
                     else:
-                        st.write(f"✅ {len(items)} artikel ditemukan. Memproses...")
-                        df_bulk = _run_bulk_pull(items, fetch_full, src_label)
-                        st.session_state["bulk_art_df"] = df_bulk
-                        bstatus.update(
-                            label=f"✅ Selesai — {len(df_bulk):,} artikel berhasil diunduh.",
-                            state="complete", expanded=False,
-                        )
+                        with st.status("📡 Memulai Pipeline Data Masif...", expanded=True) as bstatus:
+                            st.write(f"Menyiapkan pembuatan tabel dengan awalan '{prefix_db}_'...")
+                            
+                            sukses, total_baris = _run_bulk_pull_and_push_per_country(
+                                selected_countries=bsel_geo,
+                                bq_text=bq_text,
+                                bsel_ind=bsel_ind,
+                                bsel_themes=bsel_themes,
+                                prefix=prefix_db,
+                                max_articles=bulk_max,
+                                engine=st.session_state.db_engine,
+                                api=api,
+                                _extract_meta=_extract_meta,
+                                geo_map=geo_map
+                            )
+                            
+                            if sukses > 0:
+                                bstatus.update(label=f"✅ Pipeline Selesai! {total_baris:,} artikel dari {sukses} negara telah dipush ke DB.", state="complete")
+                            else:
+                                bstatus.update(label="⚠️ Gagal mengeksekusi pipeline.", state="error")
 
             # ── STEP 5: Hasil ────────────────────────────────────────────────
             if st.session_state.get("bulk_art_df") is not None:

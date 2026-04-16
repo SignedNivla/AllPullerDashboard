@@ -16,7 +16,7 @@ def get_engine(db_type, db_user, db_pass, db_host, db_port, db_name):
         conn.execute(text("SELECT 1"))
     return engine
 
-def push_to_sql(df, engine, table_name):
+def push_to_sql(df, engine, table_name, if_exists_mode = 'append'):
     """Mengirim data EIU/Artikel dengan pembersihan kolom yang sama"""
     try:
         df_clean = df.copy()
@@ -25,7 +25,7 @@ def push_to_sql(df, engine, table_name):
         df_clean.to_sql(
             table_name, 
             con=engine, 
-            if_exists='append', 
+            if_exists= if_exists_mode, 
             index=False, 
             chunksize=5000,
             method='multi'
