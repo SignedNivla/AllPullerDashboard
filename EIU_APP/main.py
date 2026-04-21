@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
 import math
+import random
 import polars as pl
 import streamlit as st
 import os
@@ -941,6 +942,7 @@ with tab_article:
                 
                 # Fungsi kecil khusus untuk dieksekusi oleh Thread
                 def fetch_page(p):
+                    time.sleep(random.uniform(0.5, 1.5))
                     r = api.advanced_search_articles(
                         search_string=bq_text, geo_codes=g_codes,
                         industries=bsel_ind or None, themes=bsel_themes or None, page=p
@@ -1100,7 +1102,7 @@ with tab_article:
                     meta["source_pull"] = source_label
                     return meta, False
 
-                with ThreadPoolExecutor(max_workers=10) as executor:
+                with ThreadPoolExecutor(max_workers=3) as executor:
                     futures = {executor.submit(fetch_single_article, item): item for item in items}
                     
                     done_count = 0
