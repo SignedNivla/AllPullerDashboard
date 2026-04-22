@@ -111,8 +111,8 @@ def db_management_dialog():
 @st.dialog("Push ke Database")
 def push_data_dialog(df, show_preview=False):
     """
-    show_preview=False  →  ⚡ Push Langsung  — langsung pilih tabel & konfirmasi
-    show_preview=True   →  🔍 Preview & Push — tampilkan 50 baris dulu, lalu konfirmasi
+    show_preview=False  →  Push Langsung  — langsung pilih tabel & konfirmasi
+    show_preview=True   →  Preview & Push — tampilkan 50 baris dulu, lalu konfirmasi
     """
     # Meta info
     st.markdown(
@@ -133,7 +133,7 @@ def push_data_dialog(df, show_preview=False):
         try:
             with st.spinner(f"Mendorong {len(df):,} baris ke '{tbl}'..."):
                 push_to_sql(df, st.session_state.db_engine, tbl)
-            st.success(f"✅ {len(df):,} baris berhasil dikirim ke tabel **{tbl}**!")
+            st.success(f"{len(df):,} baris berhasil dikirim ke tabel **{tbl}**!")
             time.sleep(1)
             st.rerun()
         except Exception as e:
@@ -337,17 +337,17 @@ with tab_data:
 
                     if res.get("hasNextPage"):
                         status.update(
-                            label=f"✅ Halaman 1 siap ({len(df):,} baris). Ada halaman berikutnya.",
+                            label=f"Halaman 1 siap ({len(df):,} baris). Ada halaman berikutnya.",
                             state="complete", expanded=False
                         )
                     else:
                         status.update(
-                            label=f"✅ Selesai! {len(df):,} baris.",
+                            label=f"Selesai! {len(df):,} baris.",
                             state="complete", expanded=False
                         )
                 else:
                     st.error(f"Error API: {err}")
-                    status.update(label="❌ Gagal menarik data.", state="error")
+                    status.update(label="Gagal menarik data.", state="error")
 
     st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
     st.divider()
@@ -380,13 +380,13 @@ with tab_data:
                     use_container_width=True
                 )
             with b2:
-                if st.button("⚡ Push Langsung", type="primary", use_container_width=True):
+                if st.button("Push Langsung", type="primary", use_container_width=True):
                     if st.session_state.db_connected:
                         push_data_dialog(df, show_preview=False)
                     else:
                         db_management_dialog()
             with b3:
-                if st.button("🔍 Preview & Push", use_container_width=True):
+                if st.button("Preview & Push", use_container_width=True):
                     if st.session_state.db_connected:
                         push_data_dialog(df, show_preview=True)
                     else:
@@ -573,7 +573,7 @@ with tab_article:
     # ── MODE B: SUB-TABS ─────────────────────────────────────────────────────
     else:
         sub_search, sub_sync, sub_bulk = st.tabs([
-            "🔍  Cari Artikel", "🔄  Sync Artikel", "📥  Bulk Download"
+            "🔍  Cari Artikel", "Sync Artikel", "Bulk Download"
         ])
 
         # ════════════════════════════════════════════════════════════════════
@@ -616,7 +616,7 @@ with tab_article:
                     return
                 meta = st.session_state.art_search_metadata
                 st.markdown(
-                    f'<div class="result-pill">📦 {meta.get("total",0):,} laporan ditemukan</div>',
+                    f'<div class="result-pill">{meta.get("total",0):,} laporan ditemukan</div>',
                     unsafe_allow_html=True
                 )
                 st.write("")
@@ -638,8 +638,8 @@ with tab_article:
                                 <div class="art-card-badge">{badge}</div>
                                 <div class="art-card-title">{title}</div>
                                 <div class="art-card-meta">
-                                    <span>🗓️ {date}</span>
-                                    <span>🆔 {art_id}</span>
+                                    <span>{date}</span>
+                                    <span>{art_id}</span>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 if st.button("Baca", key=f"read_{art_id}_{i+j}", use_container_width=True):
@@ -650,7 +650,7 @@ with tab_article:
                 st.divider()
                 p1, p2, p3 = st.columns([1, 2, 1])
                 with p1:
-                    if st.button("⬅️ Sebelumnya",
+                    if st.button("Sebelumnya",
                                  disabled=(st.session_state.art_page <= 1),
                                  use_container_width=True):
                         st.session_state.art_page -= 1
@@ -662,7 +662,7 @@ with tab_article:
                 with p2:
                     render_page_info(st.session_state.art_page, st.session_state.total_pages)
                 with p3:
-                    if st.button("Berikutnya ➡️",
+                    if st.button("Berikutnya",
                                  disabled=(st.session_state.art_page >= st.session_state.total_pages),
                                  use_container_width=True):
                         st.session_state.art_page += 1
@@ -725,7 +725,7 @@ with tab_article:
             if st.session_state.sync_results:
                 smeta = st.session_state.sync_meta
                 st.markdown(
-                    f'<div class="result-pill">📦 {smeta.get("total",0):,} artikel ditemukan</div>',
+                    f'<div class="result-pill">{smeta.get("total",0):,} artikel ditemukan</div>',
                     unsafe_allow_html=True
                 )
                 st.write("")
@@ -760,7 +760,7 @@ with tab_article:
                 st.divider()
                 sp1, sp2, sp3 = st.columns([1, 2, 1])
                 with sp1:
-                    if st.button("⬅️ Sebelumnya", key="sync_prev",
+                    if st.button("Sebelumnya", key="sync_prev",
                                  disabled=(st.session_state.sync_page <= 1),
                                  use_container_width=True):
                         st.session_state.sync_page -= 1
@@ -774,7 +774,7 @@ with tab_article:
                 with sp2:
                     render_page_info(st.session_state.sync_page, smeta.get("totalPages", 1))
                 with sp3:
-                    if st.button("Berikutnya ➡️", key="sync_next",
+                    if st.button("Berikutnya", key="sync_next",
                                  disabled=(st.session_state.sync_page >= smeta.get("totalPages", 1)),
                                  use_container_width=True):
                         st.session_state.sync_page += 1
@@ -810,7 +810,7 @@ with tab_article:
 
             bulk_source = st.radio(
                 "Sumber:",
-                options=["🔍  Pencarian (keyword / tema / negara)", "🔄  Rentang Tanggal (artikel diperbarui)"],
+                options=["🔍  Pencarian (keyword / tema / negara)", "Rentang Tanggal (artikel diperbarui)"],
                 key="bulk_source",
                 label_visibility="collapsed",
                 horizontal=True,
@@ -882,9 +882,9 @@ with tab_article:
                         value=False, key="bulk_fetch_full",
                     )
                     if fetch_full:
-                        st.caption("⚠️ Lebih lambat — 1 request tambahan per artikel untuk mengambil isi lengkap.")
+                        st.caption("Lebih lambat — 1 request tambahan per artikel untuk mengambil isi lengkap.")
                     else:
-                        st.caption("✅ Cepat — hanya metadata (judul, tanggal, abstrak, URL).")
+                        st.caption("Cepat — hanya metadata (judul, tanggal, abstrak, URL).")
 
             st.write("")
 
@@ -899,8 +899,8 @@ with tab_article:
             mode_eksekusi = st.radio(
                 "Mode Penarikan:",
                 options=[
-                    "📁 Reguler (Kumpulkan jadi 1 tabel & Tampilkan di layar)", 
-                    "🗄️ Database Pipeline (Tarik per negara & Otomatis bikin tabel di DB)"
+                    "Reguler (Kumpulkan jadi 1 tabel & Tampilkan di layar)", 
+                    "Database Pipeline (Tarik per negara & Otomatis bikin tabel di DB)"
                 ],
                 key="bulk_mode"
             )
@@ -1034,7 +1034,7 @@ with tab_article:
                     
                     items = first_res.get("results", [])
                     if not items:
-                        overall_bar.progress((idx + 1) / total_countries, text=f"⏩ Melewati {country_name} {counter_text} (Tidak ada data)")
+                        overall_bar.progress((idx + 1) / total_countries, text=f"Melewati {country_name} {counter_text} (Tidak ada data)")
                         continue 
 
                     collected = list(items)
@@ -1042,7 +1042,7 @@ with tab_article:
 
                     # Multithreading sisa halaman
                     if total_pages > 1 and len(collected) < max_articles:
-                        step_status.info(f"📥 **{country_name}** {counter_text}: Menarik sisa halaman data secara paralel...")
+                        step_status.info(f"**{country_name}** {counter_text}: Menarik sisa halaman data secara paralel...")
                         page_size = len(items) if len(items) > 0 else 50
                         remaining_needed = max_articles - len(collected)
                         additional_pages = math.ceil(remaining_needed / page_size)
@@ -1059,7 +1059,7 @@ with tab_article:
 
                     # Potong list sesuai max_articles
                     collected = collected[:max_articles]
-                    step_status.warning(f"⚙️ **{country_name}** {counter_text}: Memformat {len(collected)} baris data...")
+                    step_status.warning(f" **{country_name}** {counter_text}: Memformat {len(collected)} baris data...")
                     # Ekstrak data
                     rows = [_extract_meta(item) for item in collected]
                     df = pd.DataFrame(rows)
@@ -1071,7 +1071,7 @@ with tab_article:
                         success_count += 1
                         total_rows_inserted += len(df)
 
-                    overall_bar.progress((idx + 1) / total_countries, text=f"✅ Selesai memproses {country_name} {counter_text}")
+                    overall_bar.progress((idx + 1) / total_countries, text=f"Selesai memproses {country_name} {counter_text}")
 
                 step_status.empty()
                 
@@ -1137,18 +1137,18 @@ with tab_article:
                             src_label = "modified"
 
                         if not items:
-                            bstatus.update(label="⚠️ Tidak ada artikel ditemukan.", state="error")
+                            bstatus.update(label="Tidak ada artikel ditemukan.", state="error")
                         else:
-                            st.write(f"✅ {len(items)} artikel ditemukan. Memproses...")
+                            st.write(f"{len(items)} artikel ditemukan. Memproses...")
                             df_bulk = _run_bulk_pull(items, fetch_full, src_label)
                             st.session_state["bulk_art_df"] = df_bulk
                             bstatus.update(
-                                label=f"✅ Selesai — {len(df_bulk):,} artikel berhasil diunduh.",
+                                label=f"Selesai — {len(df_bulk):,} artikel berhasil diunduh.",
                                 state="complete", expanded=False,
                             )
                 else:
                     if not st.session_state.db_connected:
-                        st.error("❌ Koneksi Database belum aktif! Silakan hubungkan di Tab Database.")
+                        st.error("Koneksi Database belum aktif! Silakan hubungkan di Tab Database.")
                     elif not is_search_mode:
                         st.warning("Mode Pipeline per negara saat ini baru dioptimalkan untuk opsi Pencarian (Keyword/Tema).")
                     elif not bsel_geo:
@@ -1171,9 +1171,9 @@ with tab_article:
                             )
                             
                             if sukses > 0:
-                                bstatus.update(label=f"✅ Pipeline Selesai! {total_baris:,} artikel dari {sukses} negara telah dipush ke DB.", state="complete")
+                                bstatus.update(label=f"Pipeline Selesai! {total_baris:,} artikel dari {sukses} negara telah dipush ke DB.", state="complete")
                             else:
-                                bstatus.update(label="⚠️ Gagal mengeksekusi pipeline.", state="error")
+                                bstatus.update(label="Gagal mengeksekusi pipeline.", state="error")
 
             # ── STEP 5: Hasil ────────────────────────────────────────────────
             if st.session_state.get("bulk_art_df") is not None:
@@ -1196,7 +1196,7 @@ with tab_article:
                         use_container_width=True, type="primary",
                     )
                 with ba2:
-                    if st.button("⚡ Push ke Database", use_container_width=True,
+                    if st.button("Push ke Database", use_container_width=True,
                                  key="bulk_push_db"):
                         if st.session_state.db_connected:
                             push_data_dialog(df_bulk, show_preview=False)
@@ -1312,7 +1312,7 @@ with tab_reports:
             <div class="art-card-badge">EIU Report</div>
             <div class="active-report-strip-name">{r_name}</div>
             <div class="active-report-strip-meta">
-                🗓️ {r_date} &nbsp;·&nbsp; {st.session_state.rep_geo_name}
+                {r_date} &nbsp;·&nbsp; {st.session_state.rep_geo_name}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -1324,7 +1324,7 @@ with tab_reports:
                 st.info("Tidak ada artikel ditemukan untuk edisi ini.")
                 return
             st.markdown(
-                f'<div class="result-pill">📦 {len(articles)} artikel ditemukan</div>',
+                f'<div class="result-pill">{len(articles)} artikel ditemukan</div>',
                 unsafe_allow_html=True
             )
             st.write("")
@@ -1343,8 +1343,8 @@ with tab_reports:
                             <div class="art-card-badge">EIU Report</div>
                             <div class="art-card-title">{title}</div>
                             <div class="art-card-meta">
-                                <span>🗓️ {date}</span>
-                                <span>🆔 {art_id}</span>
+                                <span>{date}</span>
+                                <span>{art_id}</span>
                             </div>
                             """, unsafe_allow_html=True)
                             if st.button("Baca", key=f"rep_read_{art_id}_{i+j}",
@@ -1362,7 +1362,7 @@ with tab_reports:
         st.caption("Pilih negara untuk melihat laporan unggulan EIU.")
 
         if not geo_map:
-            st.warning("⚠️ Tidak ada data negara.")
+            st.warning("Tidak ada data negara.")
         else:
             r1, r2 = st.columns([3, 1], vertical_alignment="bottom")
             with r1:
@@ -1385,7 +1385,7 @@ with tab_reports:
                 if not st.session_state.rep_reports_list:
                     return
                 st.markdown(
-                    f'<div class="result-pill">📦 {len(st.session_state.rep_reports_list)} '
+                    f'<div class="result-pill">{len(st.session_state.rep_reports_list)} '
                     f'reports tersedia — {st.session_state.rep_geo_name}</div>',
                     unsafe_allow_html=True
                 )
@@ -1530,7 +1530,7 @@ with tab_unctad:
             total_rows_pulled = 0
             errors = {}
 
-            with st.status(f"📡 Memproses Data Masif...", expanded=True) as status:
+            with st.status(f"Memproses Data Masif...", expanded=True) as status:
                 for i, code in enumerate(sel_unctad, 1):
                     match = next((d for d in UNCTAD_CATALOG if d["code"] == code), None)
                     name  = match["name"] if match else code
@@ -1540,7 +1540,7 @@ with tab_unctad:
                     
                     if err:
                         errors[code] = err
-                        st.write(f"  ❌ Gagal unduh/ekstrak: {err}")
+                        st.write(f" Gagal unduh/ekstrak: {err}")
                         continue
 
                     st.write("  ⚙️ Memfilter jutaan baris dengan Polars...")
@@ -1548,7 +1548,7 @@ with tab_unctad:
                     
                     if err_pl or df_polars is None:
                         errors[code] = err_pl or "Gagal memfilter data"
-                        st.write(f"  ❌ Gagal memproses: {errors[code]}")
+                        st.write(f" Gagal memproses: {errors[code]}")
                         continue
 
                     df_polars = df_polars.with_columns([
@@ -1558,7 +1558,7 @@ with tab_unctad:
                     
                     rows_in_batch = df_polars.height
                     total_rows_pulled += rows_in_batch
-                    st.write(f"  ✅ Tersaring: {rows_in_batch:,} baris")
+                    st.write(f"  Tersaring: {rows_in_batch:,} baris")
 
                     parquet_path = os.path.join(staging_dir, f"unctad_{code}.parquet")
                     df_polars.write_parquet(parquet_path)
@@ -1574,7 +1574,7 @@ with tab_unctad:
 
                 pesan_gagal = f", {fail} gagal" if fail > 0 else ""
                 status.update(
-                    label=f"✅ Selesai — {ok}/{len(sel_unctad)} berhasil{pesan_gagal}. {total_rows_pulled:,} baris diamankan ke Disk.",
+                    label=f"Selesai — {ok}/{len(sel_unctad)} berhasil{pesan_gagal}. {total_rows_pulled:,} baris diamankan ke Disk.",
                     state="complete" if ok > 0 else "error",
                     expanded=False,
                 )
@@ -1586,7 +1586,7 @@ with tab_unctad:
             staging_dir = st.session_state.unctad_staging_dir
             
             st.divider()
-            st.success("✅ Data masif berhasil di-staging ke dalam disk (Format Parquet).")
+            st.success("Data masif berhasil di-staging ke dalam disk (Format Parquet).")
             
             bar1, bar2, bar3 = st.columns([1.5, 1.5, 1.5], gap="small")
             
@@ -1606,14 +1606,14 @@ with tab_unctad:
                     )
             
             with bar2:
-                if st.button("⚡ Push ke DB (Staging)", type="primary", use_container_width=True):
+                if st.button("Push ke DB (Staging)", type="primary", use_container_width=True):
                     if st.session_state.db_connected:
                         push_massive_dialog(staging_dir)
                     else:
                         db_management_dialog()
             
             with bar3:
-                if st.button("🔍 Preview & Push", use_container_width=True):
+                if st.button("Preview & Push", use_container_width=True):
                     if st.session_state.db_connected:
                         parquet_files = glob.glob(os.path.join(staging_dir, "*.parquet"))
                         if parquet_files:
@@ -1630,7 +1630,7 @@ with tab_unctad:
 with tab_db:
     render_section_label("Database Configuration")
     if st.session_state.db_connected:
-        st.success(f"🟢 Connected to **{st.session_state.db_config.get('db_name')}**")
+        st.success(f"Connected to **{st.session_state.db_config.get('db_name')}**")
         if st.button("Disconnect Database"):
             st.session_state.db_connected = False
             st.session_state.db_engine    = None
