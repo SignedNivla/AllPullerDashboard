@@ -30,9 +30,9 @@ def push_to_sql(df, engine, table_name, if_exists_mode = 'append'):
             chunksize=5000,
             method='multi'
         )
-        st.success(f"✅ Berhasil mengirim {len(df_clean):,} baris ke `{table_name}`")
+        st.success(f"Berhasil mengirim {len(df_clean):,} baris ke `{table_name}`")
     except Exception as e:
-        st.error(f"❌ Gagal mengirim ke `{table_name}`. Pesan: {str(e)}")
+        st.error(f"Gagal mengirim ke `{table_name}`. Pesan: {str(e)}")
 
 def check_db_rows(engine, table_name):
     """Fungsi verifikasi: Menghitung total baris langsung dari database"""
@@ -68,7 +68,7 @@ def push_parquet_dir_to_db(staging_dir, engine, table_prefix="unctad"):
         filename = os.path.basename(file_path).replace(".parquet", "")
         dynamic_table_name = f"{table_prefix}_{clean_column_name(filename)}"
         
-        st.write(f"📦 Memproses tabel: `{dynamic_table_name}`...")
+        st.write(f"Memproses tabel: `{dynamic_table_name}`...")
         
         df_pd = pl.read_parquet(file_path).to_pandas()
         df_pd.columns = [clean_column_name(c) for c in df_pd.columns]
@@ -77,13 +77,13 @@ def push_parquet_dir_to_db(staging_dir, engine, table_prefix="unctad"):
             df_pd.to_sql(
                 name=dynamic_table_name,
                 con=engine,
-                if_exists='replace', # Dataset baru = Tabel baru/Segar
+                if_exists='replace',
                 index=False,
                 chunksize=2000,
                 method=None
             )
-            st.caption(f"✅ Selesai: {len(df_pd):,} baris masuk ke `{dynamic_table_name}`")
+            st.caption(f"Selesai: {len(df_pd):,} baris masuk ke `{dynamic_table_name}`")
         except Exception as e:
-            st.error(f"❌ Gagal di tabel `{dynamic_table_name}`: {e}")
+            st.error(f"Gagal di tabel `{dynamic_table_name}`: {e}")
 
-    st.success("🚀 Semua dataset berhasil dikirim ke tabel masing-masing!")
+    st.success("Semua dataset berhasil dikirim ke tabel masing-masing!")
