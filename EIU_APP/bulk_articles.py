@@ -36,7 +36,7 @@ def get_token():
     )
     if res.status_code == 200:
         return res.json().get("token")
-    print("❌ Login failed:", res.text)
+    print("Login failed:", res.text)
     return None
 
 def make_headers(token):
@@ -53,7 +53,7 @@ def fetch_window(headers, date_from, date_to, label=""):
 
     while True:
         payload = {
-            "SearchString": "*",  # 🔥 FIX UTAMA
+            "SearchString": "*",
             "PublishedFrom": date_from,
             "PublishedTo": date_to,
             "PageNumber": page,
@@ -80,7 +80,7 @@ def fetch_window(headers, date_from, date_to, label=""):
             break
 
         if res.status_code != 200:
-            print(f"\n❌ {label} Error {res.status_code}: {res.text}")
+            print(f"\n{label} Error {res.status_code}: {res.text}")
             print("Payload:", payload)
             break
 
@@ -115,7 +115,7 @@ def fetch_window(headers, date_from, date_to, label=""):
 # COLLECT
 def collect_all_articles(headers):
     all_data = {}
-    print(f"\n📅 Year chunks ({YEAR_START}–{YEAR_END})\n")
+    print(f"\nYear chunks ({YEAR_START}–{YEAR_END})\n")
 
     for yr in range(YEAR_START, YEAR_END + 1):
         label = f"[{yr}]"
@@ -166,10 +166,10 @@ def main():
     articles = collect_all_articles(headers)
 
     if not articles:
-        print("❌ No data")
+        print("No data")
         return
 
-    print(f"\n⚡ Fetching {len(articles)} articles...")
+    print(f"\nFetching {len(articles)} articles...")
 
     results = []
     with ThreadPoolExecutor(max_workers=N_WORKERS) as exe:
@@ -181,7 +181,7 @@ def main():
 
     pd.DataFrame(results).to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
 
-    print(f"\n✅ Saved: {OUTPUT_FILE}")
+    print(f"\nSaved: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     main()
