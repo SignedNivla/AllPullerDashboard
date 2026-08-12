@@ -16,3 +16,8 @@
 
 <h3>Cara Aplikasi Bekerja </h3>
 Di dalam aplikasi user bisa memilih metode penarikan yang diinginkan.Tabel akan terbuat otomatis sesuai dengan nama yang diinput user
+
+Tl;dr
+
+python -m pip install -r requirements.txt
+python -m streamlit run EIU_APP\main.py

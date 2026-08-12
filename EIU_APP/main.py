@@ -1,14 +1,8 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import glob
-import polars as pl
 import streamlit as st
-import os
-import gc
-import tempfile
 import time
 import pandas as pd
 from eiu_api import fetch_auto_token, EIUDataAPI
-from db_handler import get_engine, push_parquet_dir_to_db, push_to_sql
+from db_handler import get_engine, push_to_sql
 from unctad_api import UNCTADDataAPI
 from unctad_catalog import catalog_as_tree, UNCTAD_CATALOG
 from config import EIU_EMAIL, EIU_PASSWORD
@@ -45,6 +39,8 @@ defaults = {
     'db_config':         {},
     'show_result_table': False,
     'bulk_art_df':       None,
+    'bulk_views_df':     None,
+    'bulk_rep_df':       None,
     'dl_id':             None,
     'dl_status':         None,
     'dl_link':           None,
@@ -137,19 +133,6 @@ def push_data_dialog(df, show_preview=False):
         except Exception as e:
             st.error(f"Gagal: {e}")
 
-@st.dialog("Transfer Data Masif ke Database")
-def push_massive_dialog(staging_dir):
-    st.info("Sistem akan membuat tabel otomatis berdasarkan Kode Dataset.")
-    
-    # User hanya input awalan, misal 'unctad' atau 'riset_2026'
-    prefix = st.text_input("Awalan Nama Tabel", value="unctad")
-    
-    if st.button("Mulai Transfer Otomatis", type="primary", use_container_width=True):
-        # Panggil fungsi baru yang kita buat tadi
-        push_parquet_dir_to_db(staging_dir, st.session_state.db_engine, prefix)
-        time.sleep(2)
-        st.rerun()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Header + Auth check
@@ -166,21 +149,6 @@ if not st.session_state.token:
 api     = EIUDataAPI(st.session_state.token)
 
 # ── One-time warm-up: pre-fill all caches on first load ──────────────────────
-
-def _flatten(data):
-    rows = []
-    for rec in data:
-        for pt in rec.get("points", []):
-            rows.append({
-                "geography_name": rec.get("geographyName"),
-                "series_name":    rec.get("seriesName"),
-                "unit":           rec.get("unit"),
-                "year":           pt.get("time", {}).get("year"),
-                "value":          pt.get("value"),
-                "status":         pt.get("status"),
-            })
-    return rows
-
 if 'cache_warmed' not in st.session_state:
     with st.spinner("Memuat data referensi..."):
         api.fetch_reference()
@@ -838,7 +806,6 @@ with tab_article:
                                                      key="bulk_themes", placeholder="Semua tema...")
                         bsel_ind    = st.multiselect("Industri:", options=industry_list,
                                                      key="bulk_ind", placeholder="Semua industri...")
-                    # Placeholders for date mode vars
                     bdate_from = pd.Timestamp.now() - pd.DateOffset(days=30)
                     bdate_to   = pd.Timestamp.now()
                     bsync_geos = []
@@ -853,7 +820,6 @@ with tab_article:
                     with d3:
                         bsync_geos = st.multiselect("Filter Negara:", options=sorted(geo_map.keys()),
                                                     key="bulk_sync_geo", placeholder="Semua negara...")
-                    # Placeholders for search mode vars
                     bq_text = ""; bsel_geo = []; bsel_themes = []; bsel_ind = []
 
             st.write("")
@@ -870,8 +836,8 @@ with tab_article:
                 op1, op2 = st.columns([2, 3], gap="medium")
                 with op1:
                     bulk_max = st.number_input(
-                        "Maksimum artikel:", min_value=10, max_value=10000,
-                        value=100, step=20, key="bulk_max",
+                        "Maksimum artikel:", min_value=10, max_value=5000,
+                        value=100, step=10, key="bulk_max",
                         help="Jumlah maksimum artikel yang akan ditarik."
                     )
                 with op2:
@@ -901,37 +867,98 @@ with tab_article:
 
             # ── Pull logic ────────────────────────────────────────────────────
             def _collect_articles_search(max_articles):
-                g_codes   = [geo_map[n] for n in bsel_geo]
+                """Loop per country so each article is tagged to its exact country."""
                 collected = []
-                page = 1
-                while len(collected) < max_articles:
-                    res = api.advanced_search_articles(
-                        search_string=bq_text, geo_codes=g_codes,
-                        industries=bsel_ind or None, themes=bsel_themes or None, page=page,
-                    )
-                    items = res.get("results", [])
-                    if not items: break
-                    collected.extend(items)
-                    if page >= res.get("totalPages", 1): break
-                    page += 1
+                # If no country selected, do a single search with no geo filter
+                if not bsel_geo:
+                    page = 1
+                    while len(collected) < max_articles:
+                        res = api.advanced_search_articles(
+                            search_string=bq_text, geo_codes=[],
+                            industries=bsel_ind or None, themes=bsel_themes or None, page=page,
+                        )
+                        items = res.get("results", [])
+                        if not items: break
+                        for item in items:
+                            collected.append({"item": item, "country": "Unknown"})
+                        if page >= res.get("totalPages", 1): break
+                        page += 1
+                else:
+                    per_country = max(max_articles // len(bsel_geo), 10)
+                    for geo_name in bsel_geo:
+                        g_code = geo_map[geo_name]
+                        page = 1
+                        count = 0
+                        while count < per_country:
+                            res = api.advanced_search_articles(
+                                search_string=bq_text, geo_codes=[g_code],
+                                industries=bsel_ind or None, themes=bsel_themes or None, page=page,
+                            )
+                            items = res.get("results", [])
+                            if not items: break
+                            for item in items:
+                                collected.append({"item": item, "country": geo_name})
+                                count += 1
+                            if page >= res.get("totalPages", 1): break
+                            page += 1
                 return collected[:max_articles]
+
 
             def _collect_articles_sync(max_articles):
-                gc_sync   = [geo_map[n] for n in bsync_geos] if bsync_geos else None
+                """Loop per country so each article is tagged to its exact country."""
                 collected = []
-                page = 1
-                while len(collected) < max_articles:
-                    res = api.fetch_modified_articles(
-                        str(bdate_from), str(bdate_to), gc_sync, page, 100, "ModifiedDate"
-                    )
-                    items = res.get("results", [])
-                    if not items: break
-                    collected.extend(items)
-                    if page >= res.get("totalPages", 1): break
-                    page += 1
+                if not bsync_geos:
+                    page = 1
+                    while len(collected) < max_articles:
+                        res = api.fetch_modified_articles(
+                            str(bdate_from), str(bdate_to), None, page, 100, "ModifiedDate"
+                        )
+                        items = res.get("results", [])
+                        if not items: break
+                        for item in items:
+                            collected.append({"item": item, "country": "Unknown"})
+                        if page >= res.get("totalPages", 1): break
+                        page += 1
+                else:
+                    per_country = max(max_articles // len(bsync_geos), 10)
+                    for geo_name in bsync_geos:
+                        g_code = geo_map[geo_name]
+                        page = 1
+                        count = 0
+                        while count < per_country:
+                            res = api.fetch_modified_articles(
+                                str(bdate_from), str(bdate_to), [g_code], page, 100, "ModifiedDate"
+                            )
+                            items = res.get("results", [])
+                            if not items: break
+                            for item in items:
+                                collected.append({"item": item, "country": geo_name})
+                                count += 1
+                            if page >= res.get("totalPages", 1): break
+                            page += 1
                 return collected[:max_articles]
+            
+            def _strip_html(html):
+                import re
+                return re.sub(r"<[^>]+>", " ", html).strip() if html else ""
 
-            def _extract_meta(item):
+            def _fetch_one(art_id, hdrs):
+                """Fetch headline + body_text for one article."""
+                import time as _time
+                for attempt in range(3):
+                    try:
+                        res = api.fetch_article_details(art_id)
+                        ninjs = res.get("articleAsNinjs", {})
+                        return {
+                            "headline":  ninjs.get("headline", ""),
+                            "body_text": _strip_html(ninjs.get("body_html", "")),
+                        }
+                    except Exception:
+                        _time.sleep(1)
+                return {"headline": "", "body_text": ""}
+            
+            # ── FIXED: _extract_meta now properly resolves country ────────────
+            def _extract_meta(item, country=""):
                 s = item.get("searchResultSummary") or item.get("resultSummary") or item
                 return {
                     "articleId":        s.get("articleId", ""),
@@ -941,75 +968,68 @@ with tab_article:
                     "abstract":         s.get("abstract", ""),
                     "viewpointUrl":     s.get("viewpointUrl", ""),
                     "apiUrl":           s.get("apiUrl", ""),
+                    "country":          country,
                 }
 
-            def _strip_html(html):
-                import re
-                return re.sub(r"<[^>]+>", " ", html).strip() if html else ""
 
-            def _run_bulk_pull(items, fetch_full_content, source_label):
-                rows = []
-                total = len(items)
-                err_count = 0
-                
-                bar_container = st.empty()
-                bar = bar_container.progress(0, text="Initializing workers... Please wait.")
+            def _run_bulk_pull(collected, fetch_full_content, source_label):
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                total  = len(collected)
+                # Each entry is now {"item": ..., "country": ...}
+                metas  = [_extract_meta(c["item"], country=c["country"]) for c in collected]
+                rows   = [None] * total
+                bar    = st.progress(0, text=f"Memproses 0/{total} artikel...")
+                done   = 0
 
-                def fetch_single_article(item):
-                    meta = _extract_meta(item)
-                    art_id = meta["articleId"]
-                    
-                    if fetch_full_content and art_id:
-                        try:
-                            details = api.fetch_article_details(art_id)
-                            ninjs = details.get("articleAsNinjs", {})
-                            meta["headline"] = ninjs.get("headline", "")
-                            meta["body_text"] = _strip_html(ninjs.get("body_html", ""))
-                            meta["language"] = ninjs.get("language", "")
-                        except Exception:
-                            return None, True
-                    
-                    meta["source_pull"] = source_label
-                    return meta, False
+                if fetch_full_content:
+                    N_WORKERS = 15
+                    with ThreadPoolExecutor(max_workers=N_WORKERS) as ex:
+                        fut_map = {
+                            ex.submit(_fetch_one, metas[i]["articleId"], None): i
+                            for i in range(total) if metas[i]["articleId"]
+                        }
+                        for fut in as_completed(fut_map):
+                            i       = fut_map[fut]
+                            content = fut.result()
+                            rows[i] = {**metas[i], **content, "source_pull": source_label}
+                            done   += 1
+                            bar.progress(done / total,
+                                text=f"[{done}/{total}] {rows[i].get('articleTitle','')[:55]}...")
+                    for i in range(total):
+                        if rows[i] is None:
+                            rows[i] = {**metas[i], "headline": "", "body_text": "",
+                                    "source_pull": source_label}
+                else:
+                    for i, meta in enumerate(metas):
+                        rows[i] = {**meta, "source_pull": source_label}
+                        done += 1
+                        bar.progress(done / total,
+                            text=f"[{done}/{total}] {meta.get('articleTitle','')[:55]}...")
 
-                with ThreadPoolExecutor(max_workers=10) as executor:
-                    futures = {executor.submit(fetch_single_article, item): item for item in items}
-                    
-                    done_count = 0
-                    for future in as_completed(futures):
-                        done_count += 1
-                        result, is_error = future.result()
-                        
-                        if is_error:
-                            err_count += 1
-                        elif result:
-                            rows.append(result)
-                    
-                        bar.progress(done_count / total, 
-                                    text=f"Selesai {done_count}/{total} artikel... ({err_count} gagal)")
-
-                bar_container.empty()
-                if err_count:
-                    st.warning(f"Selesai, tapi ada {err_count} artikel yang gagal diambil kontennya.")
-                
-                return pd.DataFrame(rows)
+                bar.empty()
+                df = pd.DataFrame(rows)
+                target_cols = ["articleId", "articleTitle", "publicationDate",
+                            "country",
+                            "headline", "body_text", "source_pull"]
+                keep = [c for c in target_cols if c in df.columns]
+                return df[keep]
 
             if bulk_btn:
                 with st.status("📡 Menjalankan Bulk Download...", expanded=True) as bstatus:
                     if is_search_mode:
                         st.write("Mengambil daftar artikel dari pencarian...")
-                        items = _collect_articles_search(bulk_max)
+                        collected = _collect_articles_search(bulk_max)  # ← no unpacking
                         src_label = "search"
                     else:
                         st.write("Mengambil daftar artikel dari rentang tanggal...")
-                        items = _collect_articles_sync(bulk_max)
+                        collected = _collect_articles_sync(bulk_max)    # ← no unpacking
                         src_label = "modified"
 
-                    if not items:
+                    if not collected:
                         bstatus.update(label="⚠️ Tidak ada artikel ditemukan.", state="error")
                     else:
-                        st.write(f"✅ {len(items)} artikel ditemukan. Memproses...")
-                        df_bulk = _run_bulk_pull(items, fetch_full, src_label)
+                        st.write(f"✅ {len(collected)} artikel ditemukan. Memproses...")
+                        df_bulk = _run_bulk_pull(collected, fetch_full, src_label)  # ← no country arg
                         st.session_state["bulk_art_df"] = df_bulk
                         bstatus.update(
                             label=f"✅ Selesai — {len(df_bulk):,} artikel berhasil diunduh.",
@@ -1065,31 +1085,130 @@ with tab_article:
 # TAB 3 — EIU VIEWS
 # ═════════════════════════════════════════════════════════════════════════════
 with tab_views:
-    render_section_label("Strategic Insight — EIU Views")
-    st.caption("Pilih negara untuk melihat ringkasan strategis EIU.")
+    view_browse, view_bulk = st.tabs(["🌍  Browse Views", "📥  Bulk Download"])
 
-    if not geo_map_views:
-        st.warning("Kamus kode geografi kosong.")
-    else:
-        sel_name = st.selectbox("Cari lokasi analisis:", options=sorted(geo_map_views.keys()))
-        if st.button("Lihat Pandangan Strategis", type="primary"):
-            geo_code = geo_map_views[sel_name]
-            with st.spinner(f"Menarik data analisis {sel_name}..."):
-                views = api.fetch_eiu_views(geo_code)
-            if views.get("eiuViews"):
-                for item in views["eiuViews"]:
-                    st.markdown(f"### {item['metadataName']}")
-                    styled_html = f"""
-                    <style>
-                        body {{ color:#cccccc !important;
-                            font-family:'DM Sans',sans-serif; line-height:1.6; }}
-                        a {{ color:#aaaaaa !important; text-decoration:underline; }}
-                    </style>
-                    {item['eiuViewHtml']}
-                    """
-                    st.components.v1.html(styled_html, height=600, scrolling=True)
-            else:
-                st.info(f"Belum ada narasi untuk {sel_name}.")
+    # ── SUB-TAB 1: Browse (existing) ─────────────────────────────────────────
+    with view_browse:
+        render_section_label("Strategic Insight — EIU Views")
+        st.caption("Pilih negara untuk melihat ringkasan strategis EIU.")
+
+        if not geo_map_views:
+            st.warning("Kamus kode geografi kosong.")
+        else:
+            sel_name = st.selectbox("Cari lokasi analisis:", options=sorted(geo_map_views.keys()))
+            if st.button("Lihat Pandangan Strategis", type="primary"):
+                geo_code = geo_map_views[sel_name]
+                with st.spinner(f"Menarik data analisis {sel_name}..."):
+                    views = api.fetch_eiu_views(geo_code)
+                if views.get("eiuViews"):
+                    for item in views["eiuViews"]:
+                        st.markdown(f"### {item['metadataName']}")
+                        styled_html = f"""
+                        <style>
+                            body {{ color:#cccccc !important;
+                                font-family:'DM Sans',sans-serif; line-height:1.6; }}
+                            a {{ color:#aaaaaa !important; text-decoration:underline; }}
+                        </style>
+                        {item['eiuViewHtml']}
+                        """
+                        st.components.v1.html(styled_html, height=600, scrolling=True)
+                else:
+                    st.info(f"Belum ada narasi untuk {sel_name}.")
+
+    # ── SUB-TAB 2: Bulk Download ──────────────────────────────────────────────
+    with view_bulk:
+        render_section_label("Bulk Download EIU Views")
+        st.caption("Tarik data strategic views untuk banyak negara sekaligus.")
+        st.write("")
+
+        with st.container(border=True):
+            vb1, vb2 = st.columns([3, 1], gap="medium", vertical_alignment="bottom")
+            with vb1:
+                all_geo_names = sorted(geo_map_views.keys())
+                sel_bulk_geos = st.multiselect(
+                    "Pilih Negara:",
+                    options=all_geo_names,
+                    placeholder="Kosongkan untuk semua negara...",
+                    key="views_bulk_geo",
+                )
+            with vb2:
+                if st.button("Pilih Semua", key="views_bulk_all",
+                             use_container_width=True):
+                    st.session_state["views_bulk_geo"] = all_geo_names
+                    st.rerun()
+
+        target_geos = sel_bulk_geos if sel_bulk_geos else all_geo_names
+        st.caption(f"**{len(target_geos)}** negara akan diproses.")
+        st.write("")
+
+        if st.button("▶  PULL EIU VIEWS", type="primary",
+                     use_container_width=True, key="views_bulk_run"):
+            rows = []
+            bar  = st.progress(0, text="Memulai...")
+            with st.status(f"📡 Menarik EIU Views untuk {len(target_geos)} negara...",
+                           expanded=True) as vstatus:
+                for i, name in enumerate(target_geos):
+                    code = geo_map_views[name]
+                    st.write(f"[{i+1}/{len(target_geos)}] {name}...")
+                    try:
+                        views = api.fetch_eiu_views(code)
+                        for item in views.get("eiuViews", []):
+                            import re as _re
+                            raw_html = item.get("eiuViewHtml", "")
+                            plain    = _re.sub(r"<[^>]+>", " ", raw_html)
+                            plain    = _re.sub(r"\s+", " ", plain).strip()
+                            rows.append({
+                                "countryName":    name,
+                                "countryCode":    code,
+                                "sectionName":    item.get("metadataName", ""),
+                                "content":        plain,
+                            })
+                    except Exception as e:
+                        st.write(f"  ❌ {name}: {e}")
+                    bar.progress((i + 1) / len(target_geos),
+                                 text=f"[{i+1}/{len(target_geos)}] {name}")
+
+                bar.empty()
+                df_views = pd.DataFrame(rows)
+                st.session_state["bulk_views_df"] = df_views
+                vstatus.update(
+                    label=f"✅ Selesai — {len(df_views):,} baris dari {len(target_geos)} negara.",
+                    state="complete", expanded=False,
+                )
+
+        if st.session_state.get("bulk_views_df") is not None:
+            st.divider()
+            df_views = st.session_state["bulk_views_df"]
+            vr1, vr2, vr3 = st.columns(3, gap="small")
+            with vr1:
+                st.download_button(
+                    "⬇ Download CSV",
+                    df_views.to_csv(index=False).encode("utf-8"),
+                    "eiu_views_bulk.csv", "text/csv",
+                    use_container_width=True, type="primary",
+                )
+            with vr2:
+                if st.button("⚡ Push ke DB", use_container_width=True,
+                             key="views_bulk_push", type="primary"):
+                    if st.session_state.db_connected:
+                        push_data_dialog(df_views, show_preview=False)
+                    else:
+                        db_management_dialog()
+            with vr3:
+                if st.button("🔍 Preview & Push", use_container_width=True,
+                             key="views_bulk_preview"):
+                    if st.session_state.db_connected:
+                        push_data_dialog(df_views, show_preview=True)
+                    else:
+                        db_management_dialog()
+            st.markdown(
+                f"<div style='font-size:11px; color:#5A6080; padding:4px 0;'>"
+                f"<b style='color:#F0F0DB'>{len(df_views):,}</b> baris &nbsp;·&nbsp;"
+                f"<b style='color:#F0F0DB'>{df_views['countryName'].nunique()}</b> negara &nbsp;·&nbsp;"
+                f"<b style='color:#F0F0DB'>{df_views['sectionName'].nunique()}</b> tipe section"
+                f"</div>", unsafe_allow_html=True
+            )
+            st.dataframe(df_views, use_container_width=True, height=300)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 4 — REPORTS
@@ -1199,27 +1318,30 @@ with tab_reports:
 
     # ── MODE A: REPORT CARD GRID ───────────────────────────────────────────────
     else:
-        render_section_label("Featured Reports")
-        st.caption("Pilih negara untuk melihat laporan unggulan EIU.")
+        rep_browse, rep_bulk = st.tabs(["📋  Browse Reports", "📥  Bulk Download"])
 
-        if not geo_map:
-            st.warning("⚠️ Tidak ada data negara.")
-        else:
-            r1, r2 = st.columns([3, 1], vertical_alignment="bottom")
-            with r1:
-                geo_name = st.selectbox("Pilih Negara:", options=sorted(geo_map.keys()),
-                                        key="rep_geo_sel")
-            with r2:
-                load_clicked = st.button("Muat Reports", type="primary",
-                                         use_container_width=True)
+        with rep_browse:
+            render_section_label("Featured Reports")
+            st.caption("Pilih negara untuk melihat laporan unggulan EIU.")
 
-            if load_clicked:
-                geo_code = geo_map[geo_name]
-                with st.spinner(f"Mengambil reports untuk {geo_name}..."):
-                    st.session_state.rep_reports_list = api.get_featured_reports(geo_code)
-                    st.session_state.rep_geo_code     = geo_code
-                    st.session_state.rep_geo_name     = geo_name
-                    st.session_state.rep_sel_dates    = {}
+            if not geo_map:
+                st.warning("⚠️ Tidak ada data negara.")
+            else:
+                r1, r2 = st.columns([3, 1], vertical_alignment="bottom")
+                with r1:
+                    geo_name = st.selectbox("Pilih Negara:", options=sorted(geo_map.keys()),
+                                            key="rep_geo_sel")
+                with r2:
+                    load_clicked = st.button("Muat Reports", type="primary",
+                                             use_container_width=True)
+
+                if load_clicked:
+                    geo_code = geo_map[geo_name]
+                    with st.spinner(f"Mengambil reports untuk {geo_name}..."):
+                        st.session_state.rep_reports_list = api.get_featured_reports(geo_code)
+                        st.session_state.rep_geo_code     = geo_code
+                        st.session_state.rep_geo_name     = geo_name
+                        st.session_state.rep_sel_dates    = {}
 
             @st.fragment
             def render_report_grid():
@@ -1280,6 +1402,151 @@ with tab_reports:
                     st.write("")
 
             render_report_grid()
+
+        # ── BULK DOWNLOAD tab ─────────────────────────────────────────────────
+        with rep_bulk:
+            render_section_label("Bulk Download Reports")
+            st.caption("Tarik metadata + semua artikel dari semua report untuk negara yang dipilih.")
+            st.write("")
+
+            with st.container(border=True):
+                rb1, rb2 = st.columns([3, 1], gap="medium", vertical_alignment="bottom")
+                with rb1:
+                    bulk_rep_geos = st.multiselect(
+                        "Pilih Negara:",
+                        options=sorted(geo_map.keys()),
+                        placeholder="Pilih satu atau lebih negara...",
+                        key="rep_bulk_geo",
+                    )
+                with rb2:
+                    fetch_rep_content = st.toggle(
+                        "Konten penuh", value=False, key="rep_bulk_full",
+                    )
+                st.caption("✅ Cepat — metadata saja" if not fetch_rep_content
+                           else "⚠️ Lambat — fetch body text tiap artikel")
+
+            st.write("")
+            can_rep_bulk = len(bulk_rep_geos) > 0
+            if st.button("▶  PULL REPORTS", type="primary",
+                         use_container_width=True, key="rep_bulk_run",
+                         disabled=not can_rep_bulk):
+
+                import re as _re
+                from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+                def _strip(html):
+                    return _re.sub(r"\s+", " ",
+                           _re.sub(r"<[^>]+>", " ", html or "")).strip()
+
+                all_rows = []
+                with st.status(
+                    f"📡 Menarik reports untuk {len(bulk_rep_geos)} negara...",
+                    expanded=True
+                ) as rstatus:
+                    for gi, gname in enumerate(bulk_rep_geos):
+                        gcode = geo_map[gname]
+                        st.write(f"[{gi+1}/{len(bulk_rep_geos)}] {gname} — memuat daftar report...")
+
+                        reports = api.get_featured_reports(gcode)
+                        if not reports:
+                            st.write(f"  ⚠️ Tidak ada report untuk {gname}")
+                            continue
+
+                        st.write(f"  {len(reports)} report ditemukan. Mengambil artikel...")
+
+                        for report in reports:
+                            cfg    = report.get("reportConfig", {})
+                            r_code = cfg.get("reportCode", "")
+                            r_name = cfg.get("displayName", "")
+                            dates  = report.get("reportDates", [])
+                            pub_dates = [d["reportDate"] for d in dates if d.get("reportDate")]
+
+                            for pub_date in (pub_dates[:1] if pub_dates else [None]):
+                                articles = api.get_report_articles(r_code, gcode, pub_date)
+
+                                if fetch_rep_content and articles:
+                                    # Parallel fetch content
+                                    def _fetch(art):
+                                        s      = art.get("searchResultSummary") or art.get("resultSummary") or art
+                                        art_id = s.get("articleId", "")
+                                        title  = s.get("articleTitle", "")
+                                        date   = (s.get("publicationDate") or "")[:10]
+                                        headline = ""
+                                        body     = ""
+                                        if art_id:
+                                            try:
+                                                d     = api.fetch_article_details(art_id)
+                                                ninjs = d.get("articleAsNinjs", {})
+                                                headline = ninjs.get("headline", "")
+                                                body     = _strip(ninjs.get("body_html", ""))
+                                            except Exception:
+                                                pass
+                                        return {
+                                            "countryName": gname, "countryCode": gcode,
+                                            "reportName": r_name, "reportCode": r_code,
+                                            "reportDate": pub_date or "",
+                                            "articleId": art_id, "articleTitle": title,
+                                            "publicationDate": date,
+                                            "headline": headline, "body_text": body,
+                                        }
+                                    with ThreadPoolExecutor(max_workers=10) as ex:
+                                        for row in ex.map(_fetch, articles):
+                                            all_rows.append(row)
+                                else:
+                                    for art in articles:
+                                        s = art.get("searchResultSummary") or art.get("resultSummary") or art
+                                        all_rows.append({
+                                            "countryName":     gname,
+                                            "countryCode":     gcode,
+                                            "reportName":      r_name,
+                                            "reportCode":      r_code,
+                                            "reportDate":      pub_date or "",
+                                            "articleId":       s.get("articleId", ""),
+                                            "articleTitle":    s.get("articleTitle", ""),
+                                            "publicationDate": (s.get("publicationDate") or "")[:10],
+                                        })
+
+                    df_rep = pd.DataFrame(all_rows)
+                    st.session_state["bulk_rep_df"] = df_rep
+                    rstatus.update(
+                        label=f"✅ Selesai — {len(df_rep):,} artikel dari {len(bulk_rep_geos)} negara.",
+                        state="complete", expanded=False,
+                    )
+
+            if st.session_state.get("bulk_rep_df") is not None:
+                st.divider()
+                df_rep = st.session_state["bulk_rep_df"]
+                rc1, rc2, rc3 = st.columns(3, gap="small")
+                with rc1:
+                    st.download_button(
+                        "⬇ Download CSV",
+                        df_rep.to_csv(index=False).encode("utf-8"),
+                        "eiu_reports_bulk.csv", "text/csv",
+                        use_container_width=True, type="primary",
+                    )
+                with rc2:
+                    if st.button("⚡ Push ke DB", use_container_width=True,
+                                 key="rep_bulk_push", type="primary"):
+                        if st.session_state.db_connected:
+                            push_data_dialog(df_rep, show_preview=False)
+                        else:
+                            db_management_dialog()
+                with rc3:
+                    if st.button("🔍 Preview & Push", use_container_width=True,
+                                 key="rep_bulk_preview"):
+                        if st.session_state.db_connected:
+                            push_data_dialog(df_rep, show_preview=True)
+                        else:
+                            db_management_dialog()
+
+                st.markdown(
+                    f"<div style='font-size:11px; color:#5A6080; padding:4px 0;'>"
+                    f"<b style='color:#F0F0DB'>{len(df_rep):,}</b> artikel &nbsp;·&nbsp;"
+                    f"<b style='color:#F0F0DB'>{df_rep['countryName'].nunique()}</b> negara &nbsp;·&nbsp;"
+                    f"<b style='color:#F0F0DB'>{df_rep['reportName'].nunique()}</b> report"
+                    f"</div>", unsafe_allow_html=True
+                )
+                st.dataframe(df_rep, use_container_width=True, height=300)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 5 — UNCTAD
@@ -1357,113 +1624,97 @@ with tab_unctad:
         )
 
         can_pull = len(sel_unctad) > 0
-        if st.button("▶  PULL UNCTAD (STAGING MODE)", type="primary", use_container_width=True, disabled=not can_pull):
-            
-            staging_dir = os.path.join(tempfile.gettempdir(), "unctad_staging_parquet")
-            os.makedirs(staging_dir, exist_ok=True)
-            
-            for f in glob.glob(os.path.join(staging_dir, "*.parquet")):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
-                
-            total_rows_pulled = 0
+        if st.button("▶  PULL UNCTAD", type="primary",
+                     use_container_width=True, disabled=not can_pull):
+            frames = []
             errors = {}
 
-            with st.status(f"📡 Memproses Data Masif...", expanded=True) as status:
+            with st.status(
+                f"📡 Menarik {len(sel_unctad)} dataset...", expanded=True
+            ) as status:
                 for i, code in enumerate(sel_unctad, 1):
                     match = next((d for d in UNCTAD_CATALOG if d["code"] == code), None)
                     name  = match["name"] if match else code
-                    st.write(f"[{i}/{len(sel_unctad)}] Mengekstrak {name}...")
+                    st.write(f"[{i}/{len(sel_unctad)}] {name}...")
 
-                    csv_file_path, err = unctad_api.download_and_extract_only(code) 
-                    
+                    df_raw, err = unctad_api.fetch_dataset(code)
                     if err:
                         errors[code] = err
-                        st.write(f"  ❌ Gagal unduh/ekstrak: {err}")
+                        st.write(f"  ❌ Gagal: {err}")
                         continue
 
-                    st.write("  ⚙️ Memfilter jutaan baris dengan Polars...")
-                    df_polars, err_pl = unctad_api.fetch_and_filter_massive(csv_file_path, yf_u, yt_u)
-                    
-                    if err_pl or df_polars is None:
-                        errors[code] = err_pl or "Gagal memfilter data"
-                        st.write(f"  ❌ Gagal memproses: {errors[code]}")
-                        continue
+                    filtered = unctad_api.filter_dataframe(
+                        df_raw, year_from=yf_u, year_to=yt_u
+                    )
+                    # Tag each row with its source dataset code + name
+                    filtered.insert(0, "dataset_name", name)
+                    filtered.insert(1, "dataset_code", code)
+                    frames.append(filtered)
+                    st.write(f"  ✅ {len(filtered):,} baris")
 
-                    df_polars = df_polars.with_columns([
-                        pl.lit(name).alias("dataset_name"),
-                        pl.lit(code).alias("dataset_code")
-                    ])
-                    
-                    rows_in_batch = df_polars.height
-                    total_rows_pulled += rows_in_batch
-                    st.write(f"  ✅ Tersaring: {rows_in_batch:,} baris")
-
-                    parquet_path = os.path.join(staging_dir, f"unctad_{code}.parquet")
-                    df_polars.write_parquet(parquet_path)
-                    
-                    del df_polars
-                    gc.collect()
-
-                ok   = len(sel_unctad) - len(errors)
+                ok   = len(frames)
                 fail = len(errors)
 
-                if total_rows_pulled > 0:
-                    st.session_state.unctad_staging_dir = staging_dir
+                if frames:
+                    # Merge all into one DataFrame
+                    merged = pd.concat(frames, ignore_index=True)
+                    st.session_state.unctad_result_df  = merged
+                    st.session_state.unctad_show_table = False
+                    st.write(f"  📊 Total gabungan: {len(merged):,} baris dari {ok} dataset")
 
-                pesan_gagal = f", {fail} gagal" if fail > 0 else ""
                 status.update(
-                    label=f"✅ Selesai — {ok}/{len(sel_unctad)} berhasil{pesan_gagal}. {total_rows_pulled:,} baris diamankan ke Disk.",
+                    label=f"✅ Selesai — {ok}/{len(sel_unctad)} berhasil, {len(merged):,} baris total"
+                          + (f", {fail} gagal" if fail else ""),
                     state="complete" if ok > 0 else "error",
                     expanded=False,
                 )
 
-        st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-        # ── Results (Ambil dari Direktori Staging Parquet) ──────────────────────────────────
-        if 'unctad_staging_dir' in st.session_state and os.path.exists(st.session_state.unctad_staging_dir):
-            staging_dir = st.session_state.unctad_staging_dir
-            
-            st.divider()
-            st.success("✅ Data masif berhasil di-staging ke dalam disk (Format Parquet).")
-            
-            bar1, bar2, bar3 = st.columns([1.5, 1.5, 1.5], gap="small")
-            
-            with bar1:
-                # Bungkus folder Parquet menjadi file ZIP sebelum didownload
-                import shutil
-                zip_path = os.path.join(tempfile.gettempdir(), "unctad_data_export.zip")
-                shutil.make_archive(zip_path.replace(".zip", ""), 'zip', staging_dir)
-                
-                with open(zip_path, "rb") as file:
-                    st.download_button(
-                        label="⬇ Download Semua Data (.zip)", 
-                        data=file, 
-                        file_name="unctad_massive_data.zip",
-                        mime="application/zip", 
-                        use_container_width=True
-                    )
-            
-            with bar2:
-                if st.button("⚡ Push ke DB (Staging)", type="primary", use_container_width=True):
-                    if st.session_state.db_connected:
-                        push_massive_dialog(staging_dir)
-                    else:
-                        db_management_dialog()
-            
-            with bar3:
-                if st.button("🔍 Preview & Push", use_container_width=True):
-                    if st.session_state.db_connected:
-                        parquet_files = glob.glob(os.path.join(staging_dir, "*.parquet"))
-                        if parquet_files:
-                            preview_df = pl.read_parquet(parquet_files[0]).head(50).to_pandas()
-                            push_massive_dialog(staging_dir)
-                        else:
-                            st.error("Tidak ada data parquet untuk di-preview.")
-                    else:
-                        db_management_dialog()
+    # ── Results ───────────────────────────────────────────────────────────────
+    if st.session_state.unctad_result_df is not None:
+        st.divider()
+        df = st.session_state.unctad_result_df
+
+        # Compact action bar — all in one row
+        bar1, bar2, bar3, bar4 = st.columns([1, 1.5, 1.5, 2], gap="small")
+        with bar1:
+            st.download_button(
+                "⬇ CSV", df.to_csv(index=False).encode("utf-8"),
+                "unctad_data.csv", "text/csv",
+                use_container_width=True,
+            )
+        with bar2:
+            if st.button("⚡ Push ke DB", type="primary", use_container_width=True):
+                if st.session_state.db_connected:
+                    push_data_dialog(df, show_preview=False)
+                else:
+                    db_management_dialog()
+        with bar3:
+            if st.button("🔍 Preview & Push", use_container_width=True):
+                if st.session_state.db_connected:
+                    push_data_dialog(df, show_preview=True)
+                else:
+                    db_management_dialog()
+        with bar4:
+            lbl = "▲ Sembunyikan Tabel" if st.session_state.unctad_show_table else "▼ Tampilkan Tabel"
+            if st.button(lbl, use_container_width=True):
+                st.session_state.unctad_show_table = not st.session_state.unctad_show_table
+                st.rerun()
+
+        # Info strip
+        n_datasets = df["dataset_code"].nunique() if "dataset_code" in df.columns else 1
+        st.markdown(
+            f"<div style='font-size:11px; color:#5A6080; padding:4px 2px;'>"
+            f"<span style='color:#F0F0DB; font-weight:700;'>{len(df):,}</span> baris &nbsp;·&nbsp;"
+            f"<span style='color:#F0F0DB; font-weight:700;'>{len(df.columns)}</span> kolom &nbsp;·&nbsp;"
+            f"<span style='color:#ACBAC4;'>{n_datasets} dataset digabung</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+        if st.session_state.unctad_show_table:
+            st.dataframe(df, use_container_width=True, height=420)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 6 — DATABASE

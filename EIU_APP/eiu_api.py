@@ -229,7 +229,7 @@ class EIUDataAPI:
         from_date / to_date: string 'YYYY-MM-DD' (required)
         Mengembalikan dict dengan keys: results, totalResults, totalPages, pageNumber
         """
-        url = f"{BASE_URL}/articles/modified"
+        url = f"{BASE_URL}/arti cles/modified"
         params = {
             "fromDate":  from_date,
             "toDate":    to_date,
